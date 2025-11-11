@@ -276,6 +276,65 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         ]
         self.assertEqual(recorded_seeds, expected)
 
+    def test_cleanup_stage_uses_custom_denoise_and_noise(self):
+        latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
+        recorded_seeds = []
+        recorded_denoise = []
+        noise_records = []
+
+        def fake_common_ksampler(**kwargs):
+            recorded_seeds.append(kwargs["seed"])
+            recorded_denoise.append(kwargs["denoise"])
+            latent_payload = kwargs["latent"]
+            result = latent_payload.copy()
+            result["samples"] = torch.zeros_like(latent_payload["samples"])
+            return (result,)
+
+        def fake_renoise(latent_tensor, noise_level, seed):
+            noise_records.append(noise_level)
+            return latent_tensor
+
+        with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
+            with mock.patch.object(
+                fm_upscaler.FlowMatchingProgressiveUpscaler,
+                "_apply_flow_renoise",
+                side_effect=fake_renoise,
+            ):
+                self.node.progressive_upscale(
+                    model=object(),
+                    positive=[],
+                    negative=[],
+                    latent=latent,
+                    seed=4321,
+                    steps_per_stage=2,
+                    cfg=1.0,
+                    sampler_name=self.default_sampler,
+                    scheduler=self.default_scheduler,
+                    total_scale=2.0,
+                    stages=1,
+                    renoise_start=0.05,
+                    renoise_end=0.05,
+                    skip_blend_start=0.2,
+                    skip_blend_end=0.05,
+                    upscale_method="nearest-exact",
+                    noise_schedule_override="0.05",
+                    skip_schedule_override="0.2",
+                    enable_dilated_sampling="disable",
+                    cleanup_stage="enable",
+                    cleanup_noise=0.15,
+                    cleanup_denoise=0.35,
+                    denoise=0.6,
+                )
+
+        mask64 = 0xFFFFFFFFFFFFFFFF
+        expected_seeds = [
+            4321,
+            (4321 + fm_upscaler._SEED_STRIDE) & mask64,
+        ]
+        self.assertEqual(recorded_seeds, expected_seeds)
+        self.assertEqual(recorded_denoise, [0.6, 0.35])
+        self.assertEqual(noise_records, [0.05, 0.15])
+
 
 if __name__ == "__main__":
     unittest.main()

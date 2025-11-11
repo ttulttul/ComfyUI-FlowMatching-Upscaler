@@ -27,6 +27,9 @@ provides additional global coherence.
 | `noise_schedule_override` | Optional comma-separated per-stage noise values. |
 | `skip_schedule_override` | Optional comma-separated per-stage skip blend weights. |
 | `enable_dilated_sampling` | Enables a downscale → sample → upscale refinement for better global structure. |
+| `cleanup_stage` | Adds a final non-scaling clean-up pass with a fresh seed. |
+| `cleanup_noise` | Flow-style noise ratio for the clean-up pass (0 keeps the latent untouched before denoising). |
+| `cleanup_denoise` | Denoising strength used during the clean-up pass. |
 
 All other sampler-specific arguments (`sampler_name`, `scheduler`, `cfg`,
 `steps_per_stage`, `denoise`) are passed through to ComfyUI's sampling

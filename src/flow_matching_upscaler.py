@@ -1,7 +1,7 @@
 import logging
 import math
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 
@@ -24,6 +24,8 @@ class StageConfig:
     skip_blend: float
     steps: int
     seed: int
+    denoise: Optional[float] = None
+    is_cleanup: bool = False
 
 
 def _interp_schedule(
@@ -75,6 +77,9 @@ def _resolve_stage_configs(
     seed: int,
     noise_schedule: Sequence[float],
     skip_schedule: Sequence[float],
+    include_cleanup: bool,
+    cleanup_noise: float,
+    cleanup_denoise: float,
 ) -> List[StageConfig]:
     """Create the per-stage configuration, including seeds and scale factors."""
     if stages <= 0:
@@ -82,16 +87,30 @@ def _resolve_stage_configs(
 
     scale_per_stage = math.pow(total_scale, 1.0 / stages)
     configs: List[StageConfig] = []
+    next_seed = seed & 0xFFFFFFFFFFFFFFFF
 
     for idx in range(stages):
-        stage_seed = (seed + (_SEED_STRIDE * idx)) & 0xFFFFFFFFFFFFFFFF
         configs.append(
             StageConfig(
                 scale_factor=scale_per_stage,
                 noise_level=noise_schedule[idx],
                 skip_blend=skip_schedule[idx],
                 steps=steps_per_stage,
-                seed=stage_seed,
+                seed=next_seed,
+            )
+        )
+        next_seed = (next_seed + _SEED_STRIDE) & 0xFFFFFFFFFFFFFFFF
+
+    if include_cleanup:
+        configs.append(
+            StageConfig(
+                scale_factor=1.0,
+                noise_level=cleanup_noise,
+                skip_blend=0.0,
+                steps=steps_per_stage,
+                seed=next_seed,
+                denoise=cleanup_denoise,
+                is_cleanup=True,
             )
         )
 
@@ -243,6 +262,25 @@ class FlowMatchingProgressiveUpscaler:
                     "max": 1.0,
                     "step": 0.01,
                     "tooltip": "Blend weight of the dilated refinement result.",
+                }),
+                "cleanup_stage": (["disable", "enable"], {
+                    "default": "disable",
+                    "tooltip": "Run an extra non-scaling clean-up denoise pass at the end.",
+                }),
+                "cleanup_noise": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Noise ratio for the optional clean-up stage (set to 0 to disable re-noising).",
+                }),
+                "cleanup_denoise": ("FLOAT", {
+                    "default": 0.4,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "round": 0.01,
+                    "tooltip": "Denoising strength used during the clean-up stage.",
                 }),
             },
         }
@@ -428,6 +466,9 @@ class FlowMatchingProgressiveUpscaler:
         enable_dilated_sampling="enable",
         dilated_downscale=2.0,
         dilated_blend=0.25,
+        cleanup_stage="disable",
+        cleanup_noise=0.0,
+        cleanup_denoise=0.4,
     ):
         if total_scale <= 0:
             raise ValueError("total_scale must be greater than zero.")
@@ -465,21 +506,36 @@ class FlowMatchingProgressiveUpscaler:
             seed=seed,
             noise_schedule=noise_schedule,
             skip_schedule=skip_schedule,
+            include_cleanup=cleanup_stage == "enable",
+            cleanup_noise=max(0.0, min(1.0, cleanup_noise)),
+            cleanup_denoise=max(0.0, min(1.0, cleanup_denoise)),
         )
 
         current_latent_dict = latent.copy()
         current_latent = current_latent_dict["samples"]
 
+        main_stage_count = stages
+        total_stage_count = len(stage_configs)
+
         for stage_index, stage in enumerate(stage_configs):
-            logger.info(
-                "Stage %d/%d -> scale=%.3f noise=%.3f skip=%.3f steps=%d",
-                stage_index + 1,
-                stages,
-                stage.scale_factor,
-                stage.noise_level,
-                stage.skip_blend,
-                stage.steps,
-            )
+            if stage.is_cleanup:
+                logger.info(
+                    "Cleanup stage -> noise=%.3f denoise=%.3f steps=%d",
+                    stage.noise_level,
+                    stage.denoise if stage.denoise is not None else denoise,
+                    stage.steps,
+                )
+            else:
+                logger.info(
+                    "Stage %d/%d (total %d) -> scale=%.3f noise=%.3f skip=%.3f steps=%d",
+                    stage_index + 1,
+                    main_stage_count,
+                    total_stage_count,
+                    stage.scale_factor,
+                    stage.noise_level,
+                    stage.skip_blend,
+                    stage.steps,
+                )
 
             upscaled = self._progressive_upscale_latent(
                 current_latent,
@@ -507,7 +563,7 @@ class FlowMatchingProgressiveUpscaler:
                 cfg=cfg,
                 steps=stage.steps,
                 seed=stage.seed,
-                denoise=denoise,
+                denoise=stage.denoise if stage.denoise is not None else denoise,
             )
 
             refined_samples = refined_dict["samples"]
@@ -522,7 +578,7 @@ class FlowMatchingProgressiveUpscaler:
 
             blended = skip_reference * stage.skip_blend + refined_samples * (1.0 - stage.skip_blend)
 
-            if enable_dilated_sampling == "enable":
+            if enable_dilated_sampling == "enable" and not stage.is_cleanup:
                 blended_dict = refined_dict.copy()
                 blended_dict["samples"] = blended
                 dilated = self._dilated_refinement(

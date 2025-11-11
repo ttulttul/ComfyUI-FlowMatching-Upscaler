@@ -9,3 +9,6 @@
 - A lightweight dilated refinement pass can be approximated by running a
   downsampled sampling pass and blending it back, yielding a simple but effective
   global coherence improvement without reproducing DemoFusion's full dilation logic.
+- Providing an optional clean-up stage (no scaling, zero skip blend) helps remove
+  interpolation artifacts after progressive upscaling while keeping control over
+  added noise and denoising strength.
