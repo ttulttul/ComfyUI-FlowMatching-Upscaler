@@ -12,6 +12,8 @@ from nodes import common_ksampler
 
 logger = logging.getLogger(__name__)
 
+_SEED_STRIDE = 0x9E3779B97F4A7C15  # 64-bit golden ratio constant
+
 
 @dataclass(frozen=True)
 class StageConfig:
@@ -82,7 +84,7 @@ def _resolve_stage_configs(
     configs: List[StageConfig] = []
 
     for idx in range(stages):
-        stage_seed = seed + idx
+        stage_seed = (seed + (_SEED_STRIDE * idx)) & 0xFFFFFFFFFFFFFFFF
         configs.append(
             StageConfig(
                 scale_factor=scale_per_stage,

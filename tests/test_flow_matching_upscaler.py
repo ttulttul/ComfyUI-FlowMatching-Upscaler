@@ -234,6 +234,48 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         first_call = utils_module._common_upscale_calls[0]
         self.assertEqual(first_call["method"], "bicubic")
 
+    def test_stage_seeds_are_perturbed(self):
+        latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
+        recorded_seeds = []
+
+        def fake_common_ksampler(**kwargs):
+            recorded_seeds.append(kwargs["seed"])
+            latent_payload = kwargs["latent"]
+            result = latent_payload.copy()
+            result["samples"] = torch.zeros_like(latent_payload["samples"])
+            return (result,)
+
+        with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
+            self.node.progressive_upscale(
+                model=object(),
+                positive=[],
+                negative=[],
+                latent=latent,
+                seed=1234,
+                steps_per_stage=1,
+                cfg=1.0,
+                sampler_name=self.default_sampler,
+                scheduler=self.default_scheduler,
+                total_scale=4.0,
+                stages=3,
+                renoise_start=0.0,
+                renoise_end=0.0,
+                skip_blend_start=0.5,
+                skip_blend_end=0.5,
+                upscale_method="nearest-exact",
+                noise_schedule_override="0.0,0.0,0.0",
+                skip_schedule_override="0.5,0.5,0.5",
+                enable_dilated_sampling="disable",
+            )
+
+        mask64 = 0xFFFFFFFFFFFFFFFF
+        expected = [
+            1234,
+            (1234 + fm_upscaler._SEED_STRIDE) & mask64,
+            (1234 + 2 * fm_upscaler._SEED_STRIDE) & mask64,
+        ]
+        self.assertEqual(recorded_seeds, expected)
+
 
 if __name__ == "__main__":
     unittest.main()
