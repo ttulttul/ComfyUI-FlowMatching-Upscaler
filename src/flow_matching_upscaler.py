@@ -189,14 +189,14 @@ class FlowMatchingProgressiveUpscaler:
                     "tooltip": "Noise ratio applied at the last stage (interpolated in-between).",
                 }),
                 "skip_blend_start": ("FLOAT", {
-                    "default": 0.7,
+                    "default": 0.2,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
                     "tooltip": "Blend weight for the upsampled latent at the first stage.",
                 }),
                 "skip_blend_end": ("FLOAT", {
-                    "default": 0.25,
+                    "default": 0.05,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
