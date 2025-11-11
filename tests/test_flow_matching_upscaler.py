@@ -296,8 +296,8 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
 
         with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
             with mock.patch.object(
-                fm_upscaler.FlowMatchingProgressiveUpscaler,
-                "_apply_flow_renoise",
+                fm_upscaler,
+                "apply_flow_renoise",
                 side_effect=fake_renoise,
             ):
                 self.node.progressive_upscale(
@@ -334,6 +334,40 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertEqual(recorded_seeds, expected_seeds)
         self.assertEqual(recorded_denoise, [0.6, 0.35])
         self.assertEqual(noise_records, [0.05, 0.15])
+
+    def test_stage_node_rescales_latent(self):
+        stage_node = fm_upscaler.FlowMatchingStage()
+        latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
+
+        def fake_common_ksampler(**kwargs):
+            template = kwargs["latent"]
+            result = template.copy()
+            result["samples"] = torch.full_like(template["samples"], 2.0)
+            return (result,)
+
+        with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
+            with mock.patch.object(fm_upscaler, "apply_flow_renoise", side_effect=lambda x, *_: x):
+                output_latent, = stage_node.execute(
+                    model=object(),
+                    positive=[],
+                    negative=[],
+                    latent=latent,
+                    seed=99,
+                    steps=2,
+                    cfg=3.0,
+                    sampler_name=fm_upscaler.FlowMatchingStage._SAMPLERS[0],
+                    scheduler=fm_upscaler.FlowMatchingStage._SCHEDULERS[0],
+                    scale_factor=2.0,
+                    noise_ratio=0.0,
+                    skip_blend=0.25,
+                    denoise=0.5,
+                    upscale_method="nearest-exact",
+                    enable_dilated_sampling="disable",
+                )
+
+        self.assertEqual(tuple(output_latent["samples"].shape[-2:]), (16, 16))
+        expected_value = 0.25 * 1.0 + 0.75 * 2.0
+        self.assertTrue(torch.allclose(output_latent["samples"], torch.full_like(output_latent["samples"], expected_value)))
 
 
 if __name__ == "__main__":

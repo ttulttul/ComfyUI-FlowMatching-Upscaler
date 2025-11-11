@@ -95,6 +95,164 @@ def _parse_schedule(
     return clamped
 
 
+def progressive_upscale_latent(
+    latent: torch.Tensor,
+    scale_factor: float,
+    method: str,
+) -> torch.Tensor:
+    """Resize latent tensor using ComfyUI's shared helpers."""
+    height = _ensure_int(latent.shape[-2] * scale_factor)
+    width = _ensure_int(latent.shape[-1] * scale_factor)
+    if height == latent.shape[-2] and width == latent.shape[-1]:
+        return latent
+
+    upscale_method = method
+
+    # Lanczos uses PIL internally and only supports 1/3/4 channel tensors.
+    if method == "lanczos" and latent.ndim >= 4:
+        channels = latent.shape[1]
+        if channels not in (1, 3, 4):
+            logger.warning(
+                "Lanczos upscaling is unsupported for %d-channel latents. Falling back to bicubic.",
+                channels,
+            )
+            upscale_method = "bicubic"
+
+    upscaled = comfy.utils.common_upscale(
+        latent,
+        width,
+        height,
+        upscale_method,
+        crop="disabled",
+    )
+    return upscaled
+
+
+def apply_flow_renoise(
+    latent: torch.Tensor,
+    noise_level: float,
+    seed: int,
+) -> torch.Tensor:
+    """Re-noise latent following flow matching's linear interpolation."""
+    if noise_level <= 0.0:
+        return latent
+
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    noise = torch.randn(latent.shape, generator=generator, device="cpu", dtype=latent.dtype)
+
+    if latent.device != noise.device:
+        noise = noise.to(latent.device)
+
+    noise_level = max(0.0, min(1.0, float(noise_level)))
+    blended = latent * (1.0 - noise_level) + noise * noise_level
+    return blended
+
+
+def run_sampler(
+    *,
+    model,
+    positive,
+    negative,
+    latent_template: dict,
+    sampler_name: str,
+    scheduler: str,
+    cfg: float,
+    steps: int,
+    seed: int,
+    denoise: float,
+) -> dict:
+    """Execute a sampling pass using ComfyUI's built-in sampler bridge."""
+    refined, = common_ksampler(
+        model=model,
+        seed=seed,
+        steps=steps,
+        cfg=cfg,
+        sampler_name=sampler_name,
+        scheduler=scheduler,
+        positive=positive,
+        negative=negative,
+        latent=latent_template,
+        denoise=denoise,
+    )
+    return refined
+
+
+def dilated_refinement(
+    *,
+    model,
+    positive,
+    negative,
+    sampler_name: str,
+    scheduler: str,
+    cfg: float,
+    steps: int,
+    seed: int,
+    denoise: float,
+    base_latent: dict,
+    downscale_factor: float,
+    blend: float,
+) -> torch.Tensor:
+    """
+    Run a coarse-grained refinement by downscaling, sampling, then upscaling back.
+    """
+    blend = max(0.0, min(1.0, blend))
+    if blend == 0.0:
+        return base_latent["samples"]
+
+    samples = base_latent["samples"]
+    if downscale_factor <= 1.0:
+        return samples
+
+    down_height = _ensure_int(samples.shape[-2] / downscale_factor)
+    down_width = _ensure_int(samples.shape[-1] / downscale_factor)
+
+    if down_height < 4 or down_width < 4:
+        logger.debug("Dilated refinement skipped due to excessive downscale (target too small).")
+        return samples
+
+    downsampled = comfy.utils.common_upscale(
+        samples,
+        down_width,
+        down_height,
+        "area",
+        crop="disabled",
+    )
+
+    latent_copy = base_latent.copy()
+    latent_copy["samples"] = downsampled
+
+    logger.debug(
+        "Running dilated refinement at %sx%s (factor %.2f).",
+        down_width,
+        down_height,
+        downscale_factor,
+    )
+
+    refined_down = run_sampler(
+        model=model,
+        positive=positive,
+        negative=negative,
+        latent_template=latent_copy,
+        sampler_name=sampler_name,
+        scheduler=scheduler,
+        cfg=cfg,
+        steps=max(1, steps // 2),
+        seed=seed + 10_000,
+        denoise=denoise,
+    )
+
+    upsampled = comfy.utils.common_upscale(
+        refined_down["samples"],
+        samples.shape[-1],
+        samples.shape[-2],
+        "bilinear",
+        crop="disabled",
+    )
+
+    merged = samples * (1.0 - blend) + upsampled * blend
+    return merged
+
+
 def _resolve_stage_configs(
     *,
     total_scale: float,
@@ -311,163 +469,6 @@ class FlowMatchingProgressiveUpscaler:
             },
         }
 
-    @staticmethod
-    def _progressive_upscale_latent(
-        latent: torch.Tensor,
-        scale_factor: float,
-        method: str,
-    ) -> torch.Tensor:
-        """Resize latent tensor using ComfyUI's shared helpers."""
-        height = _ensure_int(latent.shape[-2] * scale_factor)
-        width = _ensure_int(latent.shape[-1] * scale_factor)
-        if height == latent.shape[-2] and width == latent.shape[-1]:
-            return latent
-
-        upscale_method = method
-
-        # Lanczos uses PIL internally and only supports 1/3/4 channel tensors.
-        if method == "lanczos" and latent.ndim >= 4:
-            channels = latent.shape[1]
-            if channels not in (1, 3, 4):
-                logger.warning(
-                    "Lanczos upscaling is unsupported for %d-channel latents. Falling back to bicubic.",
-                    channels,
-                )
-                upscale_method = "bicubic"
-
-        upscaled = comfy.utils.common_upscale(
-            latent,
-            width,
-            height,
-            upscale_method,
-            crop="disabled",
-        )
-        return upscaled
-
-    @staticmethod
-    def _apply_flow_renoise(
-        latent: torch.Tensor,
-        noise_level: float,
-        seed: int,
-    ) -> torch.Tensor:
-        """Re-noise latent following flow matching's linear interpolation."""
-        if noise_level <= 0.0:
-            return latent
-
-        generator = torch.Generator(device="cpu").manual_seed(seed)
-        noise = torch.randn(latent.shape, generator=generator, device="cpu", dtype=latent.dtype)
-
-        if latent.device != noise.device:
-            noise = noise.to(latent.device)
-
-        noise_level = max(0.0, min(1.0, float(noise_level)))
-        blended = latent * (1.0 - noise_level) + noise * noise_level
-        return blended
-
-    @staticmethod
-    def _run_sampler(
-        model,
-        positive,
-        negative,
-        latent_template: dict,
-        sampler_name: str,
-        scheduler: str,
-        cfg: float,
-        steps: int,
-        seed: int,
-        denoise: float,
-    ) -> dict:
-        """Execute a sampling pass using ComfyUI's built-in sampler bridge."""
-        refined, = common_ksampler(
-            model=model,
-            seed=seed,
-            steps=steps,
-            cfg=cfg,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            positive=positive,
-            negative=negative,
-            latent=latent_template,
-            denoise=denoise,
-        )
-        return refined
-
-    @staticmethod
-    def _dilated_refinement(
-        *,
-        model,
-        positive,
-        negative,
-        sampler_name: str,
-        scheduler: str,
-        cfg: float,
-        steps: int,
-        seed: int,
-        denoise: float,
-        base_latent: dict,
-        downscale_factor: float,
-        blend: float,
-    ) -> torch.Tensor:
-        """
-        Run a coarse-grained refinement by downscaling, sampling, then upscaling back.
-        """
-        blend = max(0.0, min(1.0, blend))
-        if blend == 0.0:
-            return base_latent["samples"]
-
-        samples = base_latent["samples"]
-        if downscale_factor <= 1.0:
-            return samples
-
-        down_height = _ensure_int(samples.shape[-2] / downscale_factor)
-        down_width = _ensure_int(samples.shape[-1] / downscale_factor)
-
-        if down_height < 4 or down_width < 4:
-            logger.debug("Dilated refinement skipped due to excessive downscale (target too small).")
-            return samples
-
-        downsampled = comfy.utils.common_upscale(
-            samples,
-            down_width,
-            down_height,
-            "area",
-            crop="disabled",
-        )
-
-        latent_copy = base_latent.copy()
-        latent_copy["samples"] = downsampled
-
-        logger.debug(
-            "Running dilated refinement at %sx%s (factor %.2f).",
-            down_width,
-            down_height,
-            downscale_factor,
-        )
-
-        refined_down = FlowMatchingProgressiveUpscaler._run_sampler(
-            model=model,
-            positive=positive,
-            negative=negative,
-            latent_template=latent_copy,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            cfg=cfg,
-            steps=max(1, steps // 2),
-            seed=seed + 10_000,
-            denoise=denoise,
-        )
-
-        upsampled = comfy.utils.common_upscale(
-            refined_down["samples"],
-            samples.shape[-1],
-            samples.shape[-2],
-            "bilinear",
-            crop="disabled",
-        )
-
-        merged = samples * (1.0 - blend) + upsampled * blend
-        return merged
-
     def progressive_upscale(
         self,
         model,
@@ -564,14 +565,14 @@ class FlowMatchingProgressiveUpscaler:
                     stage.steps,
                 )
 
-            upscaled = self._progressive_upscale_latent(
+            upscaled = progressive_upscale_latent(
                 current_latent,
                 stage.scale_factor,
                 method=upscale_method,
             )
 
             skip_reference = upscaled.clone()
-            re_noised = self._apply_flow_renoise(
+            re_noised = apply_flow_renoise(
                 upscaled,
                 stage.noise_level,
                 stage.seed,
@@ -580,7 +581,7 @@ class FlowMatchingProgressiveUpscaler:
             latent_payload = current_latent_dict.copy()
             latent_payload["samples"] = re_noised
 
-            refined_dict = self._run_sampler(
+            refined_dict = run_sampler(
                 model=model,
                 positive=positive,
                 negative=negative,
@@ -608,7 +609,7 @@ class FlowMatchingProgressiveUpscaler:
             if enable_dilated_sampling == "enable" and not stage.is_cleanup:
                 blended_dict = refined_dict.copy()
                 blended_dict["samples"] = blended
-                dilated = self._dilated_refinement(
+                dilated = dilated_refinement(
                     model=model,
                     positive=positive,
                     negative=negative,
@@ -631,10 +632,194 @@ class FlowMatchingProgressiveUpscaler:
         return (current_latent_dict,)
 
 
+class FlowMatchingStage:
+    CATEGORY = "latent/upscaling"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("LATENT",)
+
+    _UPSCALE_METHODS: Tuple[str, ...] = (
+        "nearest-exact",
+        "bilinear",
+        "area",
+        "bicubic",
+        "lanczos",
+        "bislerp",
+    )
+
+    _SAMPLERS = tuple(comfy.samplers.KSampler.SAMPLERS)
+    _SCHEDULERS = tuple(comfy.samplers.KSampler.SCHEDULERS)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "latent": ("LATENT",),
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xffffffffffffffff,
+                }),
+                "steps": ("INT", {
+                    "default": 16,
+                    "min": 1,
+                    "max": 256,
+                }),
+                "cfg": ("FLOAT", {
+                    "default": 4.5,
+                    "min": 0.0,
+                    "max": 20.0,
+                    "step": 0.1,
+                    "round": 0.01,
+                }),
+                "sampler_name": (cls._SAMPLERS, {}),
+                "scheduler": (cls._SCHEDULERS, {}),
+                "scale_factor": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.1,
+                    "max": 8.0,
+                    "step": 0.05,
+                }),
+                "noise_ratio": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                }),
+                "skip_blend": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                }),
+                "denoise": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "round": 0.01,
+                }),
+                "upscale_method": (cls._UPSCALE_METHODS, {
+                    "default": "bicubic",
+                }),
+            },
+            "optional": {
+                "enable_dilated_sampling": (["disable", "enable"], {
+                    "default": "disable",
+                }),
+                "dilated_downscale": ("FLOAT", {
+                    "default": 2.0,
+                    "min": 1.0,
+                    "max": 4.0,
+                    "step": 0.25,
+                }),
+                "dilated_blend": ("FLOAT", {
+                    "default": 0.25,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                }),
+            },
+        }
+
+    def execute(
+        self,
+        model,
+        positive,
+        negative,
+        latent,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        scale_factor,
+        noise_ratio,
+        skip_blend,
+        denoise,
+        upscale_method,
+        enable_dilated_sampling="disable",
+        dilated_downscale=2.0,
+        dilated_blend=0.25,
+    ):
+        skip_blend = max(0.0, min(1.0, skip_blend))
+
+        current_latent_dict = latent.copy()
+        current_latent = current_latent_dict["samples"]
+
+        upscaled = progressive_upscale_latent(
+            current_latent,
+            scale_factor,
+            method=upscale_method,
+        )
+
+        skip_reference = upscaled.clone()
+        re_noised = apply_flow_renoise(
+            upscaled,
+            noise_ratio,
+            seed,
+        )
+
+        latent_payload = current_latent_dict.copy()
+        latent_payload["samples"] = re_noised
+
+        refined_dict = run_sampler(
+            model=model,
+            positive=positive,
+            negative=negative,
+            latent_template=latent_payload,
+            sampler_name=sampler_name,
+            scheduler=scheduler,
+            cfg=cfg,
+            steps=steps,
+            seed=seed,
+            denoise=denoise,
+        )
+
+        refined_samples = refined_dict["samples"]
+        if refined_samples.shape != skip_reference.shape:
+            refined_samples = comfy.utils.common_upscale(
+                refined_samples,
+                skip_reference.shape[-1],
+                skip_reference.shape[-2],
+                "bilinear",
+                crop="disabled",
+            )
+
+        blended = skip_reference * skip_blend + refined_samples * (1.0 - skip_blend)
+
+        if enable_dilated_sampling == "enable":
+            blended_dict = refined_dict.copy()
+            blended_dict["samples"] = blended
+            dilated = dilated_refinement(
+                model=model,
+                positive=positive,
+                negative=negative,
+                sampler_name=sampler_name,
+                scheduler=scheduler,
+                cfg=cfg,
+                steps=steps,
+                seed=seed,
+                denoise=denoise,
+                base_latent=blended_dict,
+                downscale_factor=max(1.0, float(dilated_downscale)),
+                blend=dilated_blend,
+            )
+            blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
+
+        out = current_latent_dict.copy()
+        out["samples"] = blended
+        return (out,)
+
+
 NODE_CLASS_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": FlowMatchingProgressiveUpscaler,
+    "FlowMatchingStage": FlowMatchingStage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": "Flow Matching Progressive Upscaler",
+    "FlowMatchingStage": "Flow Matching Stage",
 }

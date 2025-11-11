@@ -31,6 +31,22 @@ provides additional global coherence.
 | `cleanup_noise` | Flow-style noise ratio for the clean-up pass (0 keeps the latent untouched before denoising). |
 | `cleanup_denoise` | Denoising strength used during the clean-up pass. |
 
+### Modular nodes
+
+For workflows that benefit from ComfyUI’s caching, the repo also exposes a
+`FlowMatchingStage` node. Chain multiple stage nodes and feed the output latent
+from one stage into the next; only the stages whose inputs change will be
+recomputed.
+
+`FlowMatchingStage` accepts the same sampler/scheduler/CFG inputs as the
+composite node, plus per-stage controls:
+
+- `scale_factor`, `noise_ratio`, `skip_blend`, and `denoise` determine how the
+  stage behaves.
+- Optional dilated refinement mimics the all-in-one node’s global touch-up step.
+- The seed input lets you deterministically perturb or randomise individual
+  stages.
+
 All other sampler-specific arguments (`sampler_name`, `scheduler`, `cfg`,
 `steps_per_stage`, `denoise`) are passed through to ComfyUI's sampling
 infrastructure.

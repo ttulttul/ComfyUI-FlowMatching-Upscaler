@@ -15,3 +15,6 @@
 - An exponential skip schedule (high early weight tapering toward zero) keeps
   structure stable in early passes while letting later stages and optional clean-up
   add detail without reintroducing latent artifacts.
+- Exposing a per-stage node mirrors the progressive pipeline while allowing
+  ComfyUI’s existing cache to short-circuit unchanged stages, speeding up
+  iteration on late-stage parameters.
