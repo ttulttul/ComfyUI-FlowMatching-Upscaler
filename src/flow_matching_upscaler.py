@@ -635,7 +635,8 @@ class FlowMatchingProgressiveUpscaler:
 class FlowMatchingStage:
     CATEGORY = "latent/upscaling"
     FUNCTION = "execute"
-    RETURN_TYPES = ("LATENT",)
+    RETURN_TYPES = ("LATENT", "INT", "MODEL", "CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("latent", "next_seed", "model", "positive", "negative")
 
     _UPSCALE_METHODS: Tuple[str, ...] = (
         "nearest-exact",
@@ -811,7 +812,8 @@ class FlowMatchingStage:
 
         out = current_latent_dict.copy()
         out["samples"] = blended
-        return (out,)
+        next_seed = (seed + _SEED_STRIDE) & 0xFFFFFFFFFFFFFFFF
+        return (out, next_seed, model, positive, negative)
 
 
 NODE_CLASS_MAPPINGS = {

@@ -345,10 +345,11 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
             result["samples"] = torch.full_like(template["samples"], 2.0)
             return (result,)
 
+        model_obj = object()
         with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
             with mock.patch.object(fm_upscaler, "apply_flow_renoise", side_effect=lambda x, *_: x):
-                output_latent, = stage_node.execute(
-                    model=object(),
+                output_latent, next_seed, out_model, out_positive, out_negative = stage_node.execute(
+                    model=model_obj,
                     positive=[],
                     negative=[],
                     latent=latent,
@@ -368,6 +369,11 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertEqual(tuple(output_latent["samples"].shape[-2:]), (16, 16))
         expected_value = 0.25 * 1.0 + 0.75 * 2.0
         self.assertTrue(torch.allclose(output_latent["samples"], torch.full_like(output_latent["samples"], expected_value)))
+        mask64 = 0xFFFFFFFFFFFFFFFF
+        self.assertEqual(next_seed, (99 + fm_upscaler._SEED_STRIDE) & mask64)
+        self.assertIs(out_model, model_obj)
+        self.assertEqual(out_positive, [])
+        self.assertEqual(out_negative, [])
 
 
 if __name__ == "__main__":

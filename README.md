@@ -46,6 +46,8 @@ composite node, plus per-stage controls:
 - Optional dilated refinement mimics the all-in-one node’s global touch-up step.
 - The seed input lets you deterministically perturb or randomise individual
   stages.
+- Outputs include the updated seed (ready for the next stage) plus passthrough
+  model/conditioning handles to simplify chaining.
 
 All other sampler-specific arguments (`sampler_name`, `scheduler`, `cfg`,
 `steps_per_stage`, `denoise`) are passed through to ComfyUI's sampling
