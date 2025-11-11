@@ -348,10 +348,12 @@ class FlowMatchingProgressiveUpscaler:
             logger.debug("Dilated refinement skipped due to excessive downscale (target too small).")
             return samples
 
-        downsampled = torch.nn.functional.interpolate(
+        downsampled = comfy.utils.common_upscale(
             samples,
-            size=(down_height, down_width),
-            mode="area",
+            down_width,
+            down_height,
+            "area",
+            crop="disabled",
         )
 
         latent_copy = base_latent.copy()
