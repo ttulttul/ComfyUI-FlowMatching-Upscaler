@@ -31,6 +31,10 @@ provides additional global coherence.
 | `cleanup_noise` | Flow-style noise ratio for the clean-up pass (0 keeps the latent untouched before denoising). |
 | `cleanup_denoise` | Denoising strength used during the clean-up pass. |
 
+The node outputs the refined latent, the next seed (base seed plus stage stride),
+and pass-through references for the model and conditioning so you can chain
+additional nodes if needed.
+
 ### Modular nodes
 
 For workflows that benefit from ComfyUI’s caching, the repo also exposes a

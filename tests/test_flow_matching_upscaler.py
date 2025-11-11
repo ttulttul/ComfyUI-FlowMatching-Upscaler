@@ -101,9 +101,10 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
             result["samples"] = torch.zeros_like(latent_payload["samples"])
             return (result,)
 
+        model_obj = object()
         with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
-            output_latent, = self.node.progressive_upscale(
-                model=object(),
+            output_latent, next_seed, out_model, out_positive, out_negative = self.node.progressive_upscale(
+                model=model_obj,
                 positive=[],
                 negative=[],
                 latent=self.base_latent,
@@ -126,6 +127,12 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
 
         self.assertEqual(captured_shapes, [(16, 16), (32, 32)])
         self.assertEqual(tuple(output_latent["samples"].shape[-2:]), (32, 32))
+        mask64 = 0xFFFFFFFFFFFFFFFF
+        expected_next_seed = (123 + 2 * fm_upscaler._SEED_STRIDE) & mask64
+        self.assertEqual(next_seed, expected_next_seed)
+        self.assertIs(out_model, model_obj)
+        self.assertEqual(out_positive, [])
+        self.assertEqual(out_negative, [])
 
     def test_skip_blend_override_controls_result(self):
         def fake_common_ksampler(**kwargs):
@@ -134,9 +141,10 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
             result["samples"] = torch.full_like(latent_payload["samples"], 2.0)
             return (result,)
 
+        model_obj = object()
         with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
-            output_latent, = self.node.progressive_upscale(
-                model=object(),
+            output_latent, next_seed, out_model, out_positive, out_negative = self.node.progressive_upscale(
+                model=model_obj,
                 positive=[],
                 negative=[],
                 latent=self.base_latent,
@@ -159,6 +167,12 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
 
         expected = torch.full_like(output_latent["samples"], 2.0)
         self.assertTrue(torch.allclose(output_latent["samples"], expected))
+        mask64 = 0xFFFFFFFFFFFFFFFF
+        expected_next_seed = (7 + 2 * fm_upscaler._SEED_STRIDE) & mask64
+        self.assertEqual(next_seed, expected_next_seed)
+        self.assertIs(out_model, model_obj)
+        self.assertEqual(out_positive, [])
+        self.assertEqual(out_negative, [])
 
     def test_dilated_refinement_handles_extra_dimensions(self):
         latent = {"samples": torch.ones((1, 4, 2, 8, 8), dtype=torch.float32)}
@@ -169,9 +183,10 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
             result["samples"] = torch.zeros_like(latent_payload["samples"])
             return (result,)
 
+        model_obj = object()
         with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
-            output_latent, = self.node.progressive_upscale(
-                model=object(),
+            output_latent, next_seed, out_model, out_positive, out_negative = self.node.progressive_upscale(
+                model=model_obj,
                 positive=[],
                 negative=[],
                 latent=latent,
@@ -195,6 +210,11 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
             )
 
         self.assertEqual(tuple(output_latent["samples"].shape), (1, 4, 2, 16, 16))
+        mask64 = 0xFFFFFFFFFFFFFFFF
+        self.assertEqual(next_seed, (5 + fm_upscaler._SEED_STRIDE) & mask64)
+        self.assertIs(out_model, model_obj)
+        self.assertEqual(out_positive, [])
+        self.assertEqual(out_negative, [])
 
     def test_lanczos_falls_back_for_high_channel_latent(self):
         latent = {"samples": torch.ones((1, 16, 8, 8), dtype=torch.float32)}

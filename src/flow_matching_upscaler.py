@@ -320,7 +320,8 @@ class FlowMatchingProgressiveUpscaler:
 
     CATEGORY = "latent/upscaling"
     FUNCTION = "progressive_upscale"
-    RETURN_TYPES = ("LATENT",)
+    RETURN_TYPES = ("LATENT", "INT", "MODEL", "CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("latent", "next_seed", "model", "positive", "negative")
 
     _UPSCALE_METHODS: Tuple[str, ...] = (
         "nearest-exact",
@@ -629,7 +630,9 @@ class FlowMatchingProgressiveUpscaler:
             current_latent_dict["samples"] = current_latent
 
         logger.info("Progressive upscale complete. Final latent shape: %s", tuple(current_latent.shape))
-        return (current_latent_dict,)
+        final_seed = stage_configs[-1].seed if stage_configs else seed
+        next_seed = (final_seed + _SEED_STRIDE) & 0xFFFFFFFFFFFFFFFF
+        return (current_latent_dict, next_seed, model, positive, negative)
 
 
 class FlowMatchingStage:
