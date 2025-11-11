@@ -257,11 +257,23 @@ class FlowMatchingProgressiveUpscaler:
         if height == latent.shape[-2] and width == latent.shape[-1]:
             return latent
 
+        upscale_method = method
+
+        # Lanczos uses PIL internally and only supports 1/3/4 channel tensors.
+        if method == "lanczos" and latent.ndim >= 4:
+            channels = latent.shape[1]
+            if channels not in (1, 3, 4):
+                logger.warning(
+                    "Lanczos upscaling is unsupported for %d-channel latents. Falling back to bicubic.",
+                    channels,
+                )
+                upscale_method = "bicubic"
+
         upscaled = comfy.utils.common_upscale(
             latent,
             width,
             height,
-            method,
+            upscale_method,
             crop="disabled",
         )
         return upscaled

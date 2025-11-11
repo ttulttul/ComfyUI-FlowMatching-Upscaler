@@ -19,7 +19,16 @@ def _install_test_stubs():
 
         samplers_module.KSampler = _SamplerStub
 
+        call_log = []
+
         def common_upscale(samples, width, height, upscale_method, crop):
+            call_log.append(
+                {
+                    "method": upscale_method,
+                    "shape": tuple(samples.shape),
+                    "target": (height, width),
+                }
+            )
             orig_shape = samples.shape
             tensor = samples
 
@@ -50,6 +59,7 @@ def _install_test_stubs():
             return tensor
 
         utils_module.common_upscale = common_upscale
+        utils_module._common_upscale_calls = call_log
 
         comfy_module.samplers = samplers_module
         comfy_module.utils = utils_module
@@ -185,6 +195,44 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
             )
 
         self.assertEqual(tuple(output_latent["samples"].shape), (1, 4, 2, 16, 16))
+
+    def test_lanczos_falls_back_for_high_channel_latent(self):
+        latent = {"samples": torch.ones((1, 16, 8, 8), dtype=torch.float32)}
+
+        def fake_common_ksampler(**kwargs):
+            latent_payload = kwargs["latent"]
+            result = latent_payload.copy()
+            result["samples"] = torch.zeros_like(latent_payload["samples"])
+            return (result,)
+
+        utils_module = fm_upscaler.comfy.utils
+        utils_module._common_upscale_calls.clear()
+
+        with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
+            self.node.progressive_upscale(
+                model=object(),
+                positive=[],
+                negative=[],
+                latent=latent,
+                seed=11,
+                steps_per_stage=1,
+                cfg=1.0,
+                sampler_name=self.default_sampler,
+                scheduler=self.default_scheduler,
+                total_scale=2.0,
+                stages=1,
+                renoise_start=0.0,
+                renoise_end=0.0,
+                skip_blend_start=0.5,
+                skip_blend_end=0.5,
+                upscale_method="lanczos",
+                noise_schedule_override="0.0",
+                skip_schedule_override="0.5",
+                enable_dilated_sampling="disable",
+            )
+
+        first_call = utils_module._common_upscale_calls[0]
+        self.assertEqual(first_call["method"], "bicubic")
 
 
 if __name__ == "__main__":
