@@ -23,7 +23,7 @@ provides additional global coherence.
 | `total_scale` | Overall scale factor from the input latent to the final output. |
 | `stages` | Number of progressive stages (each stage scales by `total_scale^(1/stages)`). |
 | `renoise_start / end` | Flow-style noise ratios at the first/last stage. Intermediate values are interpolated unless overridden. |
-| `skip_blend_start / end` | Skip residual blend weights at the first/last stage (defaults 0.20→0.05 to keep the sampler output dominant). |
+| `skip_blend_start / end` | Skip residual blend weights at the first/last stage (defaults 0.80→0.05; interpolated exponentially across stages). |
 | `noise_schedule_override` | Optional comma-separated per-stage noise values. |
 | `skip_schedule_override` | Optional comma-separated per-stage skip blend weights. |
 | `enable_dilated_sampling` | Enables a downscale → sample → upscale refinement for better global structure. |

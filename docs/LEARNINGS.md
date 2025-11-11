@@ -12,3 +12,6 @@
 - Providing an optional clean-up stage (no scaling, zero skip blend) helps remove
   interpolation artifacts after progressive upscaling while keeping control over
   added noise and denoising strength.
+- An exponential skip schedule (high early weight tapering toward zero) keeps
+  structure stable in early passes while letting later stages and optional clean-up
+  add detail without reintroducing latent artifacts.

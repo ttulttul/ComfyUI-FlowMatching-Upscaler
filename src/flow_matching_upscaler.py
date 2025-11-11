@@ -42,6 +42,28 @@ def _interp_schedule(
     return [start + i * delta for i in range(count)]
 
 
+def _exp_schedule(
+    start: float,
+    end: float,
+    count: int,
+) -> List[float]:
+    """Create an exponentially decaying schedule between start and end inclusive."""
+    if count <= 0:
+        return []
+    if count == 1:
+        return [start]
+
+    eps = 1e-6
+    start_eff = start if start > 0 else eps
+    end_eff = end if end > 0 else eps
+    ratio = math.pow(end_eff / start_eff, 1.0 / (count - 1))
+
+    values = [start_eff * (ratio ** i) for i in range(count)]
+    values[0] = start
+    values[-1] = end
+    return values
+
+
 def _parse_schedule(
     override: str,
     count: int,
@@ -50,6 +72,7 @@ def _parse_schedule(
     *,
     clamp_min: float = 0.0,
     clamp_max: float = 1.0,
+    curve: str = "linear",
 ) -> List[float]:
     """
     Parse a comma-separated override schedule. When empty, interpolate between start and end.
@@ -63,7 +86,10 @@ def _parse_schedule(
                 f"Expected {count} schedule values but received {len(values)} ({values})."
             )
     else:
-        values = _interp_schedule(start, end, count)
+        if curve == "exponential":
+            values = _exp_schedule(start, end, count)
+        else:
+            values = _interp_schedule(start, end, count)
 
     clamped = [max(clamp_min, min(clamp_max, value)) for value in values]
     return clamped
@@ -208,7 +234,7 @@ class FlowMatchingProgressiveUpscaler:
                     "tooltip": "Noise ratio applied at the last stage (interpolated in-between).",
                 }),
                 "skip_blend_start": ("FLOAT", {
-                    "default": 0.2,
+                    "default": 0.8,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
@@ -497,6 +523,7 @@ class FlowMatchingProgressiveUpscaler:
             skip_blend_end,
             clamp_min=0.0,
             clamp_max=1.0,
+            curve="exponential",
         )
 
         stage_configs = _resolve_stage_configs(
