@@ -18,3 +18,5 @@
 - Exposing a per-stage node mirrors the progressive pipeline while allowing
   ComfyUI’s existing cache to short-circuit unchanged stages, speeding up
   iteration on late-stage parameters.
+- Shipping a lightweight frontend extension lets custom nodes hook into ComfyUI’s
+  live preview events so users retain the familiar inline thumbnail experience.

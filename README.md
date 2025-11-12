@@ -33,7 +33,8 @@ provides additional global coherence.
 
 The node outputs the refined latent, the next seed (base seed plus stage stride),
 and pass-through references for the model and conditioning so you can chain
-additional nodes if needed.
+additional nodes if needed. A thumbnail preview is rendered directly on the node
+while sampling, matching the native KSampler experience.
 
 ### Modular nodes
 
@@ -52,6 +53,8 @@ composite node, plus per-stage controls:
   stages.
 - Outputs include the updated seed (ready for the next stage) plus passthrough
   model/conditioning handles to simplify chaining.
+- Stage nodes also display the live thumbnail preview via the shared frontend
+  extension.
 
 All other sampler-specific arguments (`sampler_name`, `scheduler`, `cfg`,
 `steps_per_stage`, `denoise`) are passed through to ComfyUI's sampling
