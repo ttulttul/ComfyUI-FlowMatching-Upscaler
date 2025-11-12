@@ -154,6 +154,28 @@ def apply_flow_renoise(
     return blended
 
 
+def _prepare_latent_for_sampler(latent_dict: dict) -> Tuple[dict, callable]:
+    samples = latent_dict["samples"]
+    if samples.ndim == 5:
+        b, c, t, h, w = samples.shape
+        payload = latent_dict.copy()
+        payload["samples"] = samples.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+
+        if "noise_mask" in payload:
+            mask = payload["noise_mask"]
+            if isinstance(mask, torch.Tensor) and mask.ndim == 5:
+                mb, mc, mt, mh, mw = mask.shape
+                payload["noise_mask"] = mask.permute(0, 2, 1, 3, 4).reshape(mb * mt, mc, mh, mw)
+
+        def restore(tensor: torch.Tensor) -> torch.Tensor:
+            restored = tensor.reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4)
+            return restored
+
+        return payload, restore
+
+    return latent_dict, lambda tensor: tensor
+
+
 def run_sampler(
     *,
     model,
@@ -234,11 +256,13 @@ def dilated_refinement(
         downscale_factor,
     )
 
+    sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_copy)
+
     refined_down = run_sampler(
         model=model,
         positive=positive,
         negative=negative,
-        latent_template=latent_copy,
+        latent_template=sampler_payload,
         sampler_name=sampler_name,
         scheduler=scheduler,
         cfg=cfg,
@@ -246,6 +270,11 @@ def dilated_refinement(
         seed=seed + 10_000,
         denoise=denoise,
     )
+
+    restored_samples = restore_fn(refined_down["samples"])
+    if restored_samples is not refined_down["samples"]:
+        refined_down = refined_down.copy()
+        refined_down["samples"] = restored_samples
 
     upsampled = comfy.utils.common_upscale(
         refined_down["samples"],
@@ -588,11 +617,13 @@ class FlowMatchingProgressiveUpscaler:
             latent_payload = current_latent_dict.copy()
             latent_payload["samples"] = re_noised
 
+            sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_payload)
+
             refined_dict = run_sampler(
                 model=model,
                 positive=positive,
                 negative=negative,
-                latent_template=latent_payload,
+                latent_template=sampler_payload,
                 sampler_name=sampler_name,
                 scheduler=scheduler,
                 cfg=cfg,
@@ -601,6 +632,10 @@ class FlowMatchingProgressiveUpscaler:
                 denoise=stage.denoise if stage.denoise is not None else denoise,
             )
 
+            restored_samples = restore_fn(refined_dict["samples"])
+            if restored_samples is not refined_dict["samples"]:
+                refined_dict = refined_dict.copy()
+                refined_dict["samples"] = restored_samples
             refined_samples = refined_dict["samples"]
             if refined_samples.shape != skip_reference.shape:
                 refined_samples = comfy.utils.common_upscale(
@@ -775,11 +810,13 @@ class FlowMatchingStage:
         latent_payload = current_latent_dict.copy()
         latent_payload["samples"] = re_noised
 
+        sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_payload)
+
         refined_dict = run_sampler(
             model=model,
             positive=positive,
             negative=negative,
-            latent_template=latent_payload,
+            latent_template=sampler_payload,
             sampler_name=sampler_name,
             scheduler=scheduler,
             cfg=cfg,
@@ -788,6 +825,10 @@ class FlowMatchingStage:
             denoise=denoise,
         )
 
+        restored_samples = restore_fn(refined_dict["samples"])
+        if restored_samples is not refined_dict["samples"]:
+            refined_dict = refined_dict.copy()
+            refined_dict["samples"] = restored_samples
         refined_samples = refined_dict["samples"]
         if refined_samples.shape != skip_reference.shape:
             refined_samples = comfy.utils.common_upscale(
