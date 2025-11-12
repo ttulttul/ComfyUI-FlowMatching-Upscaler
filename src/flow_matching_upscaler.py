@@ -103,6 +103,12 @@ def progressive_upscale_latent(
     """Resize latent tensor using ComfyUI's shared helpers."""
     height = _ensure_int(latent.shape[-2] * scale_factor)
     width = _ensure_int(latent.shape[-1] * scale_factor)
+    def _align(value: int, multiple: int = 2) -> int:
+        return max(multiple, int(math.ceil(value / multiple) * multiple))
+
+    width = _align(width, 2)
+    height = _align(height, 2)
+
     if height == latent.shape[-2] and width == latent.shape[-1]:
         return latent
 
