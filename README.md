@@ -32,9 +32,10 @@ provides additional global coherence.
 | `cleanup_denoise` | Denoising strength used during the clean-up pass. |
 
 The node outputs the refined latent, the next seed (base seed plus stage stride),
-and pass-through references for the model and conditioning so you can chain
-additional nodes if needed. A thumbnail preview is rendered directly on the node
-while sampling, matching the native KSampler experience.
+the latent that entered the sampler (`presampler_latent`), and pass-through
+references for the model and conditioning so you can chain additional nodes if
+needed. A thumbnail preview is rendered directly on the node while sampling,
+matching the native KSampler experience.
 
 ### Modular nodes
 
@@ -51,8 +52,7 @@ composite node, plus per-stage controls:
 - Optional dilated refinement mimics the all-in-one node’s global touch-up step.
 - The seed input lets you deterministically perturb or randomise individual
   stages.
-- Outputs include the updated seed (ready for the next stage) plus passthrough
-  model/conditioning handles to simplify chaining.
+- Outputs include the updated seed, the latent fed into the sampler (`presampler_latent`), and passthrough model/conditioning handles to simplify chaining.
 - Stage nodes also display the live thumbnail preview via the shared frontend
   extension.
 

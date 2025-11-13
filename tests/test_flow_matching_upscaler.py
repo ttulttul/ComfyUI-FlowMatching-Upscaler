@@ -368,7 +368,7 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         model_obj = object()
         with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
             with mock.patch.object(fm_upscaler, "apply_flow_renoise", side_effect=lambda x, *_: x):
-                output_latent, next_seed, out_model, out_positive, out_negative = stage_node.execute(
+                output_latent, presampler_latent, next_seed, out_model, out_positive, out_negative = stage_node.execute(
                     model=model_obj,
                     positive=[],
                     negative=[],
@@ -394,6 +394,7 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertIs(out_model, model_obj)
         self.assertEqual(out_positive, [])
         self.assertEqual(out_negative, [])
+        self.assertEqual(tuple(presampler_latent["samples"].shape[-2:]), (16, 16))
 
 
 if __name__ == "__main__":

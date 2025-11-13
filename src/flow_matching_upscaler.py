@@ -101,7 +101,9 @@ def progressive_upscale_latent(
     method: str,
 ) -> torch.Tensor:
     """Resize latent tensor using ComfyUI's shared helpers."""
-    if scale_factor <= 0:
+
+    # If no scaling is specified, just return the latent unmodified.
+    if scale_factor == 1.0:
         return latent
 
     height = _ensure_int(latent.shape[-2] * scale_factor)
@@ -682,8 +684,8 @@ class FlowMatchingProgressiveUpscaler:
 class FlowMatchingStage:
     CATEGORY = "latent/upscaling"
     FUNCTION = "execute"
-    RETURN_TYPES = ("LATENT", "INT", "MODEL", "CONDITIONING", "CONDITIONING")
-    RETURN_NAMES = ("latent", "next_seed", "model", "positive", "negative")
+    RETURN_TYPES = ("LATENT", "LATENT", "INT", "MODEL", "CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("latent", "presampler_latent", "next_seed", "model", "positive", "negative")
 
     _UPSCALE_METHODS: Tuple[str, ...] = (
         "nearest-exact",
@@ -866,7 +868,9 @@ class FlowMatchingStage:
         out = current_latent_dict.copy()
         out["samples"] = blended
         next_seed = (seed + _SEED_STRIDE) & 0xFFFFFFFFFFFFFFFF
-        return (out, next_seed, model, positive, negative)
+        presampler_latent = latent_payload.copy()
+        presampler_latent["samples"] = re_noised
+        return (out, presampler_latent, next_seed, model, positive, negative)
 
 
 NODE_CLASS_MAPPINGS = {
