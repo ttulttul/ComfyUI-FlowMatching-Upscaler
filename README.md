@@ -43,7 +43,7 @@ matching the native KSampler experience.
 
 ## Example workflow
 
-![Flow Matching Upscaler example workflow](examples/workflow.png)
+![Flow Matching Upscaler example workflow](examples/Flow Matching Upscaler.png)
 
 ### Modular nodes
 
