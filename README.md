@@ -13,6 +13,27 @@ in a flow-consistent manner, denoises with the selected sampler, and blends
 skip residuals to preserve composition. An optional dilated refinement pass
 provides additional global coherence.
 
+### Memory Use
+
+This node does not offer a magical ability to sample massive latents in
+a tiny amount of VRAM. If you run out of VRAM when trying to generate the
+final latent after a lot of upscaling steps, the only solution at this
+time is to buy a bigger GPU. Future work may involve adding some kind of
+tiled sampling.
+
+### Note: Upscaling is Optional
+
+You don't necessarily have to use this node pack to **upscale** images.  The
+techniques used by the node involve blending a prior latent at an optionally
+different scale and then re-sampling on top of it to produce a new latent that
+may posess more or different levels of detail -- effectively giving the model a
+second chance to generate but with some hints as to the structure that you're
+wanting it to generate.
+
+Try setting the `scale_factor` or `total_scale` to 1.0 to play around with
+the node's noising, blending, and re-sampling approach without necessarily
+also upscaling the latents with each step.
+
 ## Installation
 
 1. Clone this repository inside the `custom_nodes/` directory of your ComfyUI
