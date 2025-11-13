@@ -1,12 +1,14 @@
+import gc
 import logging
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Callable, Any
 
 import torch
 
 import comfy.samplers
 import comfy.utils
+import comfy.model_management as model_management
 
 from nodes import common_ksampler
 
@@ -208,6 +210,30 @@ def run_sampler(
         denoise=denoise,
     )
     return refined
+
+
+def _run_with_oom_retry(operation: Callable[[], Any], *, description: str):
+    """
+    Execute `operation` and retry once after clearing caches if an OOM occurs.
+    """
+    attempts = 0
+    while True:
+        try:
+            return operation()
+        except (model_management.OOM_EXCEPTION, RuntimeError) as exc:
+            message = str(exc).lower()
+            is_runtime_oom = isinstance(exc, RuntimeError) and "out of memory" in message
+            if not isinstance(exc, model_management.OOM_EXCEPTION) and not is_runtime_oom:
+                raise
+
+            attempts += 1
+            if attempts > 1:
+                logger.error("Out of memory during %s (no recovery possible).", description, exc_info=True)
+                raise
+
+            logger.warning("Out of memory during %s; clearing caches and retrying once.", description, exc_info=True)
+            gc.collect()
+            model_management.soft_empty_cache(True)
 
 
 def dilated_refinement(
@@ -624,17 +650,22 @@ class FlowMatchingProgressiveUpscaler:
 
             sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_payload)
 
-            refined_dict = run_sampler(
-                model=model,
-                positive=positive,
-                negative=negative,
-                latent_template=sampler_payload,
-                sampler_name=sampler_name,
-                scheduler=scheduler,
-                cfg=cfg,
-                steps=stage.steps,
-                seed=stage.seed,
-                denoise=stage.denoise if stage.denoise is not None else denoise,
+            stage_label = f"progressive stage {stage_index + 1}/{main_stage_count}"
+
+            refined_dict = _run_with_oom_retry(
+                lambda: run_sampler(
+                    model=model,
+                    positive=positive,
+                    negative=negative,
+                    latent_template=sampler_payload,
+                    sampler_name=sampler_name,
+                    scheduler=scheduler,
+                    cfg=cfg,
+                    steps=stage.steps,
+                    seed=stage.seed,
+                    denoise=stage.denoise if stage.denoise is not None else denoise,
+                ),
+                description=f"{stage_label} sampling",
             )
 
             restored_samples = restore_fn(refined_dict["samples"])
@@ -656,19 +687,22 @@ class FlowMatchingProgressiveUpscaler:
             if enable_dilated_sampling == "enable" and not stage.is_cleanup:
                 blended_dict = refined_dict.copy()
                 blended_dict["samples"] = blended
-                dilated = dilated_refinement(
-                    model=model,
-                    positive=positive,
-                    negative=negative,
-                    sampler_name=sampler_name,
-                    scheduler=scheduler,
-                    cfg=cfg,
-                    steps=stage.steps,
-                    seed=stage.seed,
-                    denoise=denoise,
-                    base_latent=blended_dict,
-                    downscale_factor=max(1.0, float(dilated_downscale)),
-                    blend=dilated_blend,
+                dilated = _run_with_oom_retry(
+                    lambda: dilated_refinement(
+                        model=model,
+                        positive=positive,
+                        negative=negative,
+                        sampler_name=sampler_name,
+                        scheduler=scheduler,
+                        cfg=cfg,
+                        steps=stage.steps,
+                        seed=stage.seed,
+                        denoise=denoise,
+                        base_latent=blended_dict,
+                        downscale_factor=max(1.0, float(dilated_downscale)),
+                        blend=dilated_blend,
+                    ),
+                    description=f"{stage_label} dilated refinement",
                 )
                 blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
 
