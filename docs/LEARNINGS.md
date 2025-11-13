@@ -20,3 +20,7 @@
   iteration on late-stage parameters.
 - Shipping a lightweight frontend extension lets custom nodes hook into ComfyUI’s
   live preview events so users retain the familiar inline thumbnail experience.
+- Progressive stages currently invoke `common_ksampler` on the full latent; to
+  make ultra-high resolutions practical we need an automatic fallback (e.g.
+  tiling or attention chunking) when `comfy.model_management` reports
+  insufficient VRAM.
