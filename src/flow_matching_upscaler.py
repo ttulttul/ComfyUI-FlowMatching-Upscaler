@@ -101,6 +101,9 @@ def progressive_upscale_latent(
     method: str,
 ) -> torch.Tensor:
     """Resize latent tensor using ComfyUI's shared helpers."""
+    if scale_factor <= 0:
+        return latent
+
     height = _ensure_int(latent.shape[-2] * scale_factor)
     width = _ensure_int(latent.shape[-1] * scale_factor)
     def _align(value: int, multiple: int = 2) -> int:
