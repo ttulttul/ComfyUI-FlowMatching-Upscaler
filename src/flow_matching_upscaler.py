@@ -612,7 +612,7 @@ class FlowMatchingProgressiveUpscaler:
                 method=upscale_method,
             )
 
-            skip_reference = upscaled.clone()
+            skip_reference = upscaled
             re_noised = apply_flow_renoise(
                 upscaled,
                 stage.noise_level,
