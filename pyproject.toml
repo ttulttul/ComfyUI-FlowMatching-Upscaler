@@ -1,0 +1,19 @@
+[project]
+name = "comfyui-flowmatching-upscaler"
+description = ""
+version = "1.0.0"
+license = { text = "MIT License" }
+dependencies = ["numpy>=2.0", "torch>=2.1", "einops>=0.6", "aiohttp>=3.9"]
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+
+[project.urls]
+Repository = "https://github.com/ttulttul/ComfyUI-FlowMatching-Upscaler"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = "ttulttul"
+DisplayName = "ComfyUI-FlowMatching-Upscaler"
+Icon = "https://raw.githubusercontent.com/ttulttul/ComfyUI-FlowMatching-Upscaler/98100e71a2fc348765a380607364878119536caf/images/Icon.png"
