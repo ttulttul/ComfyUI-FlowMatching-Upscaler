@@ -102,6 +102,7 @@ recomputed.
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
 | `enable_dilated_sampling` | enum | `"disable"` | Enables the dilated refinement pass for this specific stage. |
+| `reduce_memory_use` | enum | `"enable"` | Reuses the upscaled latent instead of cloning it ahead of skip blending to save VRAM. |
 | `dilated_downscale` | FLOAT `1.0 → 4.0` | `2.0` | Downscale factor when dilated sampling runs. |
 | `dilated_blend` | FLOAT `0.0 → 1.0` | `0.25` | Blend weight used when reintegrating the dilated result. |
 
@@ -116,6 +117,9 @@ Stage nodes display the same inline thumbnail preview as the composite node.
 
 When chaining stages manually, remember to forward the `next_seed` output into
 the subsequent stage’s `seed` input to maintain deterministic noise progression.
+If you keep `reduce_memory_use` enabled, downstream custom logic that inspects
+the upscaled latent while this node runs may observe in-place updates because
+the tensor is shared instead of cloned.
 
 ## Development
 

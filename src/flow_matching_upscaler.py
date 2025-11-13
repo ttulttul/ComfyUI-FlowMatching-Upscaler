@@ -793,6 +793,9 @@ class FlowMatchingStage:
                 "enable_dilated_sampling": (["disable", "enable"], {
                     "default": "disable",
                 }),
+                "reduce_memory_use": (["disable", "enable"], {
+                    "default": "enable",
+                }),
                 "dilated_downscale": ("FLOAT", {
                     "default": 2.0,
                     "min": 1.0,
@@ -825,6 +828,7 @@ class FlowMatchingStage:
         denoise,
         upscale_method,
         enable_dilated_sampling="disable",
+        reduce_memory_use="enable",
         dilated_downscale=2.0,
         dilated_blend=0.25,
     ):
@@ -839,7 +843,12 @@ class FlowMatchingStage:
             method=upscale_method,
         )
 
-        skip_reference = upscaled.clone()
+        if reduce_memory_use == "enable":
+            # Reuse the upscaled tensor to avoid holding two full-resolution copies.
+            skip_reference = upscaled
+        else:
+            skip_reference = upscaled.clone()
+
         re_noised = apply_flow_renoise(
             upscaled,
             noise_ratio,
