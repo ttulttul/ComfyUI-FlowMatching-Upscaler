@@ -24,3 +24,6 @@
   make ultra-high resolutions practical we need an automatic fallback (e.g.
   tiling or attention chunking) when `comfy.model_management` reports
   insufficient VRAM.
+- Deriving an aspect-aware tile grid from a `tile_size` fraction lets the tiled
+  stage sample massive latents sequentially while advancing seeds per tile so
+  downstream chaining stays deterministic.

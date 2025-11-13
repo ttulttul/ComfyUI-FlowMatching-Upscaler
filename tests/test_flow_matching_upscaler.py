@@ -82,6 +82,7 @@ _install_test_stubs()
 
 import src.flow_matching_upscaler as fm_upscaler  # noqa: E402
 from src.flow_matching_upscaler import FlowMatchingProgressiveUpscaler  # noqa: E402
+from src.flow_matching_upscaler import FlowMatchingTiledStage  # noqa: E402
 
 
 class FlowMatchingUpscalerTests(unittest.TestCase):
@@ -395,6 +396,97 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertEqual(out_positive, [])
         self.assertEqual(out_negative, [])
         self.assertEqual(tuple(presampler_latent["samples"].shape[-2:]), (16, 16))
+
+
+class FlowMatchingTiledStageTests(unittest.TestCase):
+    def setUp(self):
+        self.node = FlowMatchingTiledStage()
+        self.default_sampler = FlowMatchingProgressiveUpscaler._SAMPLERS[0]
+        self.default_scheduler = FlowMatchingProgressiveUpscaler._SCHEDULERS[0]
+
+    def test_half_tile_size_splits_landscape_in_two(self):
+        base_latent = {"samples": torch.ones((1, 4, 8, 16), dtype=torch.float32)}
+        call_shapes = []
+
+        def fake_run_sampler(**kwargs):
+            latent_payload = kwargs["latent_template"]
+            tile_samples = latent_payload["samples"]
+            call_shapes.append(tuple(tile_samples.shape[-2:]))
+            result = latent_payload.copy()
+            result["samples"] = torch.zeros_like(tile_samples)
+            return result
+
+        with mock.patch.object(fm_upscaler, "run_sampler", new=fake_run_sampler):
+            output, presampler, next_seed, *_ = self.node.execute(
+                model=object(),
+                positive=[],
+                negative=[],
+                latent=base_latent,
+                seed=21,
+                steps=3,
+                cfg=2.0,
+                sampler_name=self.default_sampler,
+                scheduler=self.default_scheduler,
+                scale_factor=1.0,
+                noise_ratio=0.0,
+                skip_blend=0.0,
+                denoise=1.0,
+                upscale_method="nearest-exact",
+                tile_size=0.5,
+                enable_dilated_sampling="disable",
+                reduce_memory_use="enable",
+                dilated_downscale=2.0,
+                dilated_blend=0.25,
+            )
+
+        self.assertEqual(call_shapes, [(8, 8), (8, 8)])
+        self.assertEqual(tuple(output["samples"].shape[-2:]), (8, 16))
+        self.assertEqual(tuple(presampler["samples"].shape[-2:]), (8, 16))
+        mask64 = 0xFFFFFFFFFFFFFFFF
+        expected_seed = (21 + 2 * fm_upscaler._SEED_STRIDE) & mask64
+        self.assertEqual(next_seed, expected_seed)
+
+    def test_quadrant_split_for_quarter_tile_size(self):
+        base_latent = {"samples": torch.ones((1, 4, 16, 8), dtype=torch.float32)}
+        observed_tiles = []
+
+        def fake_run_sampler(**kwargs):
+            latent_payload = kwargs["latent_template"]
+            samples = latent_payload["samples"]
+            observed_tiles.append(tuple(samples.shape[-2:]))
+            result = latent_payload.copy()
+            result["samples"] = torch.full_like(samples, 5.0)
+            return result
+
+        with mock.patch.object(fm_upscaler, "run_sampler", new=fake_run_sampler):
+            output, presampler, next_seed, *_ = self.node.execute(
+                model=object(),
+                positive=[],
+                negative=[],
+                latent=base_latent,
+                seed=99,
+                steps=1,
+                cfg=1.0,
+                sampler_name=self.default_sampler,
+                scheduler=self.default_scheduler,
+                scale_factor=1.0,
+                noise_ratio=0.0,
+                skip_blend=0.5,
+                denoise=1.0,
+                upscale_method="nearest-exact",
+                tile_size=0.25,
+                enable_dilated_sampling="disable",
+                reduce_memory_use="enable",
+                dilated_downscale=2.0,
+                dilated_blend=0.25,
+            )
+
+        self.assertEqual(observed_tiles, [(8, 4), (8, 4), (8, 4), (8, 4)])
+        self.assertTrue(torch.allclose(output["samples"], torch.full_like(output["samples"], 2.5)))
+        self.assertEqual(tuple(presampler["samples"].shape[-2:]), (16, 8))
+        mask64 = 0xFFFFFFFFFFFFFFFF
+        expected_seed = (99 + 4 * fm_upscaler._SEED_STRIDE) & mask64
+        self.assertEqual(next_seed, expected_seed)
 
 
 if __name__ == "__main__":
