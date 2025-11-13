@@ -69,7 +69,7 @@ A thumbnail preview is rendered on the node while sampling, matching the native 
 
 ## Example workflow
 
-![Flow Matching Upscaler example workflow](examples/workflow.png)
+![Flow Matching Upscaler example workflow](<examples/Flow Matching Upscaler.png>)
 
 ### Modular nodes
 
