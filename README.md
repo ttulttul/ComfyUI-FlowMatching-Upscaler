@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/Icon.png" alt="ComfyUI Flow Matching Upscaler Icon" width="120">
+</p>
+
 # ComfyUI Flow Matching Upscaler
 
 ## Overview
@@ -36,6 +40,10 @@ the latent that entered the sampler (`presampler_latent`), and pass-through
 references for the model and conditioning so you can chain additional nodes if
 needed. A thumbnail preview is rendered directly on the node while sampling,
 matching the native KSampler experience.
+
+## Example workflow
+
+![Flow Matching Upscaler example workflow](examples/workflow.png)
 
 ### Modular nodes
 

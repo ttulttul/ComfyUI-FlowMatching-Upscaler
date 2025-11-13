@@ -1,0 +1,7 @@
+# Core numerical stack (matches the versions bundled with the reference ComfyUI environment).
+numpy>=2.0
+torch>=2.1
+einops>=0.6
+
+# Frontend/web dependencies already present in ComfyUI, included here for completeness.
+aiohttp>=3.9
