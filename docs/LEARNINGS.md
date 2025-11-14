@@ -37,4 +37,6 @@
 - Visualizing the per-channel means/stds directly inside ComfyUI via a
   `LATENT`→`IMAGE` helper node makes it easier to spot channels worth gating,
   and the rendering math is lightweight enough to run in pure NumPy without
-  pulling matplotlib into the dependency tree.
+  pulling matplotlib into the dependency tree. Adding inline axis ticks and
+  channel indices removed the guesswork when correlating bars with latent
+  channels.

@@ -108,6 +108,9 @@ tensor whose top half plots per-channel means and bottom half plots standard
 deviations. The preview honors the logging helper above (channels are reduced
 across batch/temporal dimensions) so it is useful for spotting channels that
 dominate the energy budget before experimenting with per-channel blends.
+Each bar carries the channel index below it, while the y-axis shows min/max
+values so you can gauge scale quickly; the panel labels make it clear that the
+blue section corresponds to means and the orange section to standard deviations.
 
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|

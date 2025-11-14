@@ -469,9 +469,11 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
 
         mean_color = torch.from_numpy(fm_upscaler._MEAN_BAR_COLOR)
         std_color = torch.from_numpy(fm_upscaler._STD_BAR_COLOR)
+        background = torch.from_numpy(fm_upscaler._BACKGROUND_COLOR)
 
         mean_start, mean_height = layout["mean_section"]
         std_start, std_height = layout["std_section"]
+        channel_label_y = layout["channel_label_y"]
 
         mean_heights = []
         std_heights = []
@@ -488,10 +490,24 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
             mean_heights.append(int(mean_mask.sum().item()))
             std_heights.append(int(std_mask.sum().item()))
 
+            label_slice = image[
+                0,
+                channel_label_y:channel_label_y + fm_upscaler._FONT_HEIGHT,
+                max(0, x_center - 2):min(image.shape[2], x_center + 3),
+                :,
+            ]
+            background_diff = torch.abs(label_slice - background.view(1, 1, -1)).max()
+            self.assertGreater(background_diff.item(), 1e-3)
+
         self.assertGreater(mean_heights[1], mean_heights[0])
         self.assertGreater(mean_heights[2], mean_heights[1])
         self.assertGreater(std_heights[1], std_heights[0])
         self.assertGreater(std_heights[2], std_heights[1])
+
+        mean_label_region = image[0, mean_start:mean_start + mean_height, 4:4 + fm_upscaler._FONT_WIDTH, :]
+        std_label_region = image[0, std_start:std_start + std_height, 4:4 + fm_upscaler._FONT_WIDTH, :]
+        self.assertGreater(torch.abs(mean_label_region - background.view(1, 1, -1)).max().item(), 1e-3)
+        self.assertGreater(torch.abs(std_label_region - background.view(1, 1, -1)).max().item(), 1e-3)
 
     def test_latent_channel_stats_preview_outputs_image(self):
         samples = torch.stack(
