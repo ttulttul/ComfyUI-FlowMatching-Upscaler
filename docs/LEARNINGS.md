@@ -34,3 +34,7 @@
 - Channel-wise diagnostics surfaced via DEBUG logging helped confirm that the
   skip and dilated blends maintain stable statistics across the 16 latent
   channels, providing a foundation for future per-channel mixing experiments.
+- Visualizing the per-channel means/stds directly inside ComfyUI via a
+  `LATENT`→`IMAGE` helper node makes it easier to spot channels worth gating,
+  and the rendering math is lightweight enough to run in pure NumPy without
+  pulling matplotlib into the dependency tree.

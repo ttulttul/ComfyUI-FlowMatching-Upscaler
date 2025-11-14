@@ -101,6 +101,24 @@ multiple stage nodes and feed the output latent from one stage into the next; on
 the stages whose inputs change will be
 recomputed.
 
+#### LatentChannelStatsPreview
+
+This lightweight debug node converts a `LATENT` input into a batched `IMAGE`
+tensor whose top half plots per-channel means and bottom half plots standard
+deviations. The preview honors the logging helper above (channels are reduced
+across batch/temporal dimensions) so it is useful for spotting channels that
+dominate the energy budget before experimenting with per-channel blends.
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `latent` | LATENT | – | Source latent whose channel statistics are visualized. |
+| `channel_limit` | INT `1 → 64` | `16` | Number of channels to show; an overflow marker appears when additional channels are truncated. |
+| `height` | INT `72 → 1024` | `256` | Output image height in pixels; width scales with channel count. |
+
+The resulting tensor uses a dark background, blue bars for means, and orange
+bars for standard deviations so you can drop the node into any preview chain
+without additional styling.
+
 #### FlowMatchingStage
 
 **Required inputs**

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple, Callable, Any
 
 import torch
+import numpy as np
 
 import comfy.samplers
 import comfy.utils
@@ -17,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 _SEED_STRIDE = 0x9E3779B97F4A7C15  # 64-bit golden ratio constant
 _STREAMING_ATTENTION_BUDGET_MB = 256.0
+
+_BACKGROUND_COLOR = np.array([0.08, 0.08, 0.08], dtype=np.float32)
+_GRIDLINE_COLOR = np.array([0.25, 0.25, 0.25], dtype=np.float32)
+_MEAN_BAR_COLOR = np.array([0.2, 0.65, 0.95], dtype=np.float32)
+_STD_BAR_COLOR = np.array([0.95, 0.6, 0.2], dtype=np.float32)
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,27 @@ def _prepare_latent_for_sampler(latent_dict: dict) -> Tuple[dict, callable]:
     return latent_dict, lambda tensor: tensor
 
 
+def _reduce_channel_statistics(tensor: torch.Tensor) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Compute per-channel mean and standard deviation across all non-channel dimensions.
+    Returns None when statistics cannot be computed (e.g., invalid tensor shape).
+    """
+    if not isinstance(tensor, torch.Tensor):
+        return None
+    if tensor.ndim < 2:
+        return None
+
+    with torch.no_grad():
+        data = tensor.detach()
+        if data.shape[1] == 0:
+            return None
+
+        reduce_dims = tuple(dim for dim in range(data.ndim) if dim != 1)
+        channel_means = data.float().mean(dim=reduce_dims)
+        channel_stds = data.float().std(dim=reduce_dims, unbiased=False)
+    return channel_means, channel_stds
+
+
 def _log_channel_stats(label: str, tensor: torch.Tensor, *, limit: int = 16) -> None:
     """
     Emit per-channel mean and standard deviation diagnostics for the provided tensor.
@@ -192,40 +219,155 @@ def _log_channel_stats(label: str, tensor: torch.Tensor, *, limit: int = 16) -> 
     """
     if not logger.isEnabledFor(logging.DEBUG):
         return
-    if not isinstance(tensor, torch.Tensor):
-        logger.debug("%s channel stats unavailable (not a tensor).", label)
+
+    stats = _reduce_channel_statistics(tensor)
+    if stats is None:
+        logger.debug("%s channel stats unavailable (unsupported tensor).", label)
         return
-    if tensor.ndim < 2:
-        logger.debug("%s channel stats unavailable (shape=%s).", label, tuple(tensor.shape))
-        return
+    channel_means, channel_stds = stats
 
-    with torch.no_grad():
-        data = tensor.detach()
-        if data.shape[1] == 0:
-            logger.debug("%s channel stats unavailable (zero channels).", label)
-            return
+    mean_vals = channel_means.detach().cpu().tolist()
+    std_vals = channel_stds.detach().cpu().tolist()
 
-        reduce_dims = tuple(dim for dim in range(data.ndim) if dim != 1)
-        channel_means = data.float().mean(dim=reduce_dims)
-        channel_stds = data.float().std(dim=reduce_dims, unbiased=False)
+    entries = []
+    for idx, (mean_val, std_val) in enumerate(zip(mean_vals, std_vals)):
+        if idx >= limit:
+            break
+        entries.append(f"c{idx}: {mean_val:.4f}±{std_val:.4f}")
+    if len(mean_vals) > limit:
+        entries.append("...")
 
-        mean_vals = channel_means.detach().cpu().tolist()
-        std_vals = channel_stds.detach().cpu().tolist()
+    logger.debug(
+        "%s channel stats (%d ch): %s",
+        label,
+        len(mean_vals),
+        "; ".join(entries),
+    )
 
-        entries = []
-        for idx, (mean_val, std_val) in enumerate(zip(mean_vals, std_vals)):
-            if idx >= limit:
-                break
-            entries.append(f"c{idx}: {mean_val:.4f}±{std_val:.4f}")
-        if len(mean_vals) > limit:
-            entries.append("...")
 
-        logger.debug(
-            "%s channel stats (%d ch): %s",
-            label,
-            len(mean_vals),
-            "; ".join(entries),
+def _render_channel_stats_image(
+    channel_means: torch.Tensor,
+    channel_stds: torch.Tensor,
+    *,
+    limit: int = 16,
+    height: int = 256,
+) -> Tuple[torch.Tensor, dict]:
+    """
+    Render a simple bar chart visualizing per-channel mean (top) and std (bottom).
+
+    Returns:
+        image (torch.Tensor): Float tensor with shape (1, H, W, 3) in [0, 1].
+        layout (dict): Metadata describing bar placement and section bounds.
+    """
+    if channel_means.numel() == 0 or channel_stds.numel() == 0:
+        raise ValueError("Channel statistics must be non-empty to render.")
+
+    display_channels = max(1, min(int(limit), channel_means.numel()))
+    means_np = channel_means.detach().cpu().float().numpy()
+    stds_np = channel_stds.detach().cpu().float().numpy()
+
+    display_means = means_np[:display_channels]
+    display_stds = np.clip(stds_np[:display_channels], a_min=0.0, a_max=None)
+
+    margin_x = 18
+    margin_y = 16
+    bar_spacing = 6
+    bar_width = 16
+    section_count = 2
+
+    if height < 72:
+        height = 72
+
+    usable_height = height - margin_y * (section_count + 1)
+    section_height = max(28, usable_height // section_count)
+    actual_height = margin_y * (section_count + 1) + section_height * section_count
+
+    width = margin_x * 2 + display_channels * bar_width + (display_channels - 1) * bar_spacing
+    canvas = np.tile(_BACKGROUND_COLOR, (actual_height, width, 1))
+
+    # draw outer border
+    canvas[0, :, :] = _GRIDLINE_COLOR
+    canvas[-1, :, :] = _GRIDLINE_COLOR
+    canvas[:, 0, :] = _GRIDLINE_COLOR
+    canvas[:, -1, :] = _GRIDLINE_COLOR
+
+    top_start = margin_y
+    bottom_start = margin_y * 2 + section_height
+    x_end = width - margin_x
+
+    # Baselines for sections
+    canvas[top_start - 1, margin_x:x_end, :] = _GRIDLINE_COLOR
+    canvas[top_start + section_height - 1, margin_x:x_end, :] = _GRIDLINE_COLOR
+    canvas[bottom_start - 1, margin_x:x_end, :] = _GRIDLINE_COLOR
+    canvas[bottom_start + section_height - 1, margin_x:x_end, :] = _GRIDLINE_COLOR
+
+    mean_min = float(np.min(display_means))
+    mean_max = float(np.max(display_means))
+    if math.isclose(mean_min, mean_max):
+        mean_min -= 0.5
+        mean_max += 0.5
+    mean_range = max(mean_max - mean_min, 1e-6)
+
+    if mean_min <= 0.0 <= mean_max:
+        zero_norm = (0.0 - mean_min) / mean_range
+        zero_y = top_start + section_height - 1 - int(round(zero_norm * (section_height - 1)))
+        zero_y = max(top_start, min(top_start + section_height - 1, zero_y))
+        canvas[zero_y, margin_x:x_end, :] = np.array([0.6, 0.6, 0.6], dtype=np.float32)
+
+    std_max = float(np.max(display_stds))
+    if math.isclose(std_max, 0.0):
+        std_max = 1.0
+
+    bar_layout = []
+    for idx in range(display_channels):
+        x0 = margin_x + idx * (bar_width + bar_spacing)
+        x1 = x0 + bar_width
+        x1 = min(x1, width - margin_x)
+
+        # mean bar (top section)
+        mean_val = float(display_means[idx])
+        mean_norm = np.clip((mean_val - mean_min) / mean_range, 0.0, 1.0)
+        mean_pixels = max(1, int(round(mean_norm * (section_height - 2))))
+        mean_bottom = top_start + section_height - 2
+        mean_top = mean_bottom - mean_pixels
+        mean_top = max(top_start, mean_top)
+        canvas[mean_top:mean_bottom, x0:x1, :] = _MEAN_BAR_COLOR
+
+        # std bar (bottom section)
+        std_val = float(display_stds[idx])
+        std_norm = 0.0 if std_max <= 0.0 else np.clip(std_val / std_max, 0.0, 1.0)
+        std_pixels = 0 if std_max <= 0.0 else max(1, int(round(std_norm * (section_height - 2))))
+        std_bottom = bottom_start + section_height - 2
+        std_top = std_bottom - std_pixels
+        std_top = max(bottom_start, std_top)
+        if std_pixels > 0:
+            canvas[std_top:std_bottom, x0:x1, :] = _STD_BAR_COLOR
+
+        bar_layout.append(
+            {
+                "channel": idx,
+                "x_range": (x0, x1),
+            }
         )
+
+    if channel_means.numel() > display_channels:
+        overflow_indicator_width = min(bar_width, x_end - (x_end - bar_width))
+        canvas[top_start - 1:top_start + 1, x_end - overflow_indicator_width:x_end, :] = np.array(
+            [0.8, 0.2, 0.2], dtype=np.float32
+        )
+        canvas[bottom_start + section_height - 2:bottom_start + section_height, x_end - overflow_indicator_width:x_end, :] = np.array(
+            [0.8, 0.2, 0.2], dtype=np.float32
+        )
+
+    image = torch.from_numpy(canvas.astype(np.float32)).unsqueeze(0)
+    layout = {
+        "bar_ranges": bar_layout,
+        "mean_section": (top_start, section_height),
+        "std_section": (bottom_start, section_height),
+        "width": width,
+        "height": actual_height,
+    }
+    return image, layout
 
 
 @contextmanager
@@ -1127,12 +1269,61 @@ class FlowMatchingStage:
         return (out, presampler_latent, next_seed, model, positive, negative)
 
 
+class LatentChannelStatsPreview:
+    CATEGORY = "latent/debug"
+    FUNCTION = "render"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+            },
+            "optional": {
+                "channel_limit": ("INT", {
+                    "default": 16,
+                    "min": 1,
+                    "max": 64,
+                }),
+                "height": ("INT", {
+                    "default": 256,
+                    "min": 72,
+                    "max": 1024,
+                    "step": 4,
+                }),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        # Mark as dynamic so previews refresh reliably.
+        return float("nan")
+
+    def render(self, latent, channel_limit=16, height=256):
+        stats = _reduce_channel_statistics(latent["samples"])
+        if stats is None:
+            raise ValueError("Latent tensor must expose a channel dimension to compute statistics.")
+
+        means, stds = stats
+        image, _ = _render_channel_stats_image(
+            means,
+            stds,
+            limit=max(1, int(channel_limit)),
+            height=max(72, int(height)),
+        )
+        return (image,)
+
+
 NODE_CLASS_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": FlowMatchingProgressiveUpscaler,
     "FlowMatchingStage": FlowMatchingStage,
+    "LatentChannelStatsPreview": LatentChannelStatsPreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": "Flow Matching Progressive Upscaler",
     "FlowMatchingStage": "Flow Matching Stage",
+    "LatentChannelStatsPreview": "Latent Channel Stats Preview",
 }
