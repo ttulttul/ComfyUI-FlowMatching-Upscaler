@@ -1,6 +1,7 @@
 import gc
 import logging
 import math
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple, Callable, Any
 
@@ -183,67 +184,62 @@ def _prepare_latent_for_sampler(latent_dict: dict) -> Tuple[dict, callable]:
     return latent_dict, lambda tensor: tensor
 
 
-def _resolve_tile_grid(height: int, width: int, tile_fraction: float) -> Tuple[int, int]:
-    """Determine a tile grid (rows, cols) that respects the desired tile_fraction."""
-    tile_fraction = max(1e-3, min(1.0, float(tile_fraction)))
-    if tile_fraction >= 0.999:
-        return (1, 1)
+@contextmanager
+def _temporary_low_vram_mode(enabled: bool):
+    """
+    Temporarily force ComfyUI into LOW_VRAM mode so layers stream between CPU/GPU.
+    """
+    if not enabled:
+        yield
+        return
 
-    target_tiles = max(1, math.ceil(1.0 / tile_fraction))
-    base = int(math.sqrt(target_tiles))
-    rows = max(1, base)
-    cols = max(1, base)
-
-    # Bias the longer axis to receive the extra split first.
-    longer_is_width = width >= height
-    if rows * cols < target_tiles:
-        if longer_is_width:
-            cols += 1
-        else:
-            rows += 1
-
-    # Expand until we cover the target tile count.
-    while rows * cols < target_tiles:
-        if longer_is_width:
-            rows += 1
-        else:
-            cols += 1
-
-    # Clamp to avoid creating zero-sized slices.
-    rows = max(1, min(rows, height))
-    cols = max(1, min(cols, width))
-    return rows, cols
+    original_state = model_management.vram_state
+    try:
+        model_management.vram_state = model_management.VRAMState.LOW_VRAM
+        yield
+    finally:
+        model_management.vram_state = original_state
 
 
-def _compute_tile_slices(
-    height: int,
-    width: int,
-    rows: int,
-    cols: int,
-) -> List[Tuple[int, int, int, int]]:
-    """Compute pixel-aligned tile slices (y0, y1, x0, x1) covering the latent."""
+@contextmanager
+def _throttled_attention_budget(max_free_mb: float):
+    """
+    Cap the reported available VRAM so attention kernels fall back to smaller chunks.
+    """
+    budget_bytes = max(0, int(max_free_mb * 1024 * 1024))
+    if budget_bytes <= 0:
+        yield
+        return
 
-    def _split_extent(length: int, parts: int) -> List[Tuple[int, int]]:
-        """Evenly split a 1D extent into `parts` contiguous segments."""
-        parts = max(1, min(parts, length))
-        base = length // parts
-        remainder = length % parts
-        segments: List[Tuple[int, int]] = []
-        start = 0
-        for idx in range(parts):
-            extra = 1 if idx < remainder else 0
-            end = start + base + extra
-            segments.append((start, end))
-            start = end
-        return segments
+    original_get_free_memory = model_management.get_free_memory
 
-    y_segments = _split_extent(height, rows)
-    x_segments = _split_extent(width, cols)
-    slices: List[Tuple[int, int, int, int]] = []
-    for y0, y1 in y_segments:
-        for x0, x1 in x_segments:
-            slices.append((y0, y1, x0, x1))
-    return slices
+    def _capped_get_free_memory(dev=None, torch_free_too: bool = False):
+        result = original_get_free_memory(dev, torch_free_too)
+        if torch_free_too:
+            total_free, torch_free = result
+            capped_total = min(total_free, budget_bytes)
+            capped_torch = min(torch_free, capped_total)
+            return capped_total, capped_torch
+        return min(result, budget_bytes)
+
+    model_management.get_free_memory = _capped_get_free_memory
+    try:
+        yield
+    finally:
+        model_management.get_free_memory = original_get_free_memory
+
+
+def _execute_with_memory_controls(
+    operation: Callable[[], Any],
+    *,
+    attention_budget_mb: float,
+    enable_low_vram: bool,
+) -> Any:
+    with ExitStack() as stack:
+        stack.enter_context(_temporary_low_vram_mode(enable_low_vram))
+        if attention_budget_mb > 0.0:
+            stack.enter_context(_throttled_attention_budget(attention_budget_mb))
+        return operation()
 
 
 def run_sampler(
@@ -979,7 +975,7 @@ class FlowMatchingStage:
         return (out, presampler_latent, next_seed, model, positive, negative)
 
 
-class FlowMatchingTiledStage:
+class FlowMatchingStreamingStage:
     CATEGORY = FlowMatchingStage.CATEGORY
     FUNCTION = "execute"
     RETURN_TYPES = FlowMatchingStage.RETURN_TYPES
@@ -990,14 +986,20 @@ class FlowMatchingTiledStage:
         base = FlowMatchingStage.INPUT_TYPES()
         required = dict(base["required"])
         optional = dict(base.get("optional", {}))
-        required["tile_size"] = (
+        required["attention_budget_mb"] = (
             "FLOAT",
             {
-                "default": 0.25,
-                "min": 0.05,
-                "max": 1.0,
-                "step": 0.05,
-                "round": 0.01,
+                "default": 0.0,
+                "min": 0.0,
+                "max": 4096.0,
+                "step": 16.0,
+                "round": 0.1,
+            },
+        )
+        optional["force_low_vram_mode"] = (
+            ["disable", "enable"],
+            {
+                "default": "disable",
             },
         )
         return {"required": required, "optional": optional}
@@ -1018,14 +1020,16 @@ class FlowMatchingTiledStage:
         skip_blend,
         denoise,
         upscale_method,
-        tile_size,
+        attention_budget_mb,
         enable_dilated_sampling="disable",
         reduce_memory_use="enable",
         dilated_downscale=2.0,
         dilated_blend=0.25,
+        force_low_vram_mode="disable",
     ):
         skip_blend = max(0.0, min(1.0, skip_blend))
-        tile_size = max(1e-3, min(1.0, float(tile_size)))
+        attention_budget_mb = max(0.0, float(attention_budget_mb))
+        low_vram_enabled = force_low_vram_mode == "enable"
 
         current_latent_dict = latent.copy()
         current_latent = current_latent_dict["samples"]
@@ -1050,56 +1054,17 @@ class FlowMatchingTiledStage:
         latent_payload = current_latent_dict.copy()
         latent_payload["samples"] = re_noised
 
-        height = re_noised.shape[-2]
-        width = re_noised.shape[-1]
-        rows, cols = _resolve_tile_grid(height, width, tile_size)
-        tile_slices = _compute_tile_slices(height, width, rows, cols)
-        tile_count = len(tile_slices)
-        if tile_count == 0:
-            raise ValueError("Failed to compute valid tile slices for the provided latent.")
+        sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_payload)
 
-        actual_fraction = 1.0 / (rows * cols)
-        logger.info(
-            "Tiled sampling using %d tiles (%d rows x %d cols, ~%.3f of frame per tile).",
-            tile_count,
-            rows,
-            cols,
-            actual_fraction,
-        )
-
-        final_samples = skip_reference
-        mask64 = 0xFFFFFFFFFFFFFFFF
-
-        for tile_index, (y0, y1, x0, x1) in enumerate(tile_slices):
-            tile_seed = (seed + tile_index * _SEED_STRIDE) & mask64
-
-            tile_samples = re_noised[..., y0:y1, x0:x1].contiguous()
-            if tile_samples.numel() == 0:
-                logger.debug("Skipping empty tile (%s).", (y0, y1, x0, x1))
-                continue
-
-            tile_payload = latent_payload.copy()
-            tile_payload["samples"] = tile_samples
-
-            if "noise_mask" in tile_payload:
-                mask_value = tile_payload["noise_mask"]
-                if isinstance(mask_value, torch.Tensor) and mask_value.shape[-2:] == re_noised.shape[-2:]:
-                    tile_payload["noise_mask"] = mask_value[..., y0:y1, x0:x1].contiguous()
-
-            sampler_payload, restore_fn = _prepare_latent_for_sampler(tile_payload)
-
-            logger.debug(
-                "Sampling tile %d/%d at [%d:%d, %d:%d] (seed=%d).",
-                tile_index + 1,
-                tile_count,
-                y0,
-                y1,
-                x0,
-                x1,
-                tile_seed,
+        if attention_budget_mb > 0.0 or low_vram_enabled:
+            logger.info(
+                "Streaming stage sampling (attention budget %.1f MB, low_vram=%s).",
+                attention_budget_mb,
+                low_vram_enabled,
             )
 
-            refined_dict = _run_with_oom_retry(
+        refined_dict = _run_with_oom_retry(
+            lambda: _execute_with_memory_controls(
                 lambda: run_sampler(
                     model=model,
                     positive=positive,
@@ -1109,34 +1074,37 @@ class FlowMatchingTiledStage:
                     scheduler=scheduler,
                     cfg=cfg,
                     steps=steps,
-                    seed=tile_seed,
+                    seed=seed,
                     denoise=denoise,
                 ),
-                description=f"tiled sampling ({tile_index + 1}/{tile_count})",
+                attention_budget_mb=attention_budget_mb,
+                enable_low_vram=low_vram_enabled,
+            ),
+            description="streaming stage sampling",
+        )
+
+        refined_samples = restore_fn(refined_dict["samples"])
+        if refined_samples is not refined_dict["samples"]:
+            refined_dict = refined_dict.copy()
+            refined_dict["samples"] = refined_samples
+        refined_samples = refined_dict["samples"]
+
+        if refined_samples.shape != skip_reference.shape:
+            refined_samples = comfy.utils.common_upscale(
+                refined_samples,
+                skip_reference.shape[-1],
+                skip_reference.shape[-2],
+                "bilinear",
+                crop="disabled",
             )
 
-            refined_samples = restore_fn(refined_dict["samples"])
-            if refined_samples is not refined_dict["samples"]:
-                refined_dict = refined_dict.copy()
-                refined_dict["samples"] = refined_samples
-            refined_samples = refined_dict["samples"]
+        blended = skip_reference * skip_blend + refined_samples * (1.0 - skip_blend)
 
-            if refined_samples.shape != tile_samples.shape:
-                refined_samples = comfy.utils.common_upscale(
-                    refined_samples,
-                    tile_samples.shape[-1],
-                    tile_samples.shape[-2],
-                    "bilinear",
-                    crop="disabled",
-                )
-
-            skip_tile = skip_reference[..., y0:y1, x0:x1]
-            blended_tile = skip_tile * skip_blend + refined_samples * (1.0 - skip_blend)
-
-            if enable_dilated_sampling == "enable":
-                blended_dict = refined_dict.copy()
-                blended_dict["samples"] = blended_tile
-                dilated_tile = _run_with_oom_retry(
+        if enable_dilated_sampling == "enable":
+            blended_dict = refined_dict.copy()
+            blended_dict["samples"] = blended
+            dilated = _run_with_oom_retry(
+                lambda: _execute_with_memory_controls(
                     lambda: dilated_refinement(
                         model=model,
                         positive=positive,
@@ -1145,21 +1113,22 @@ class FlowMatchingTiledStage:
                         scheduler=scheduler,
                         cfg=cfg,
                         steps=steps,
-                        seed=tile_seed,
+                        seed=seed,
                         denoise=denoise,
                         base_latent=blended_dict,
                         downscale_factor=max(1.0, float(dilated_downscale)),
                         blend=dilated_blend,
                     ),
-                    description=f"tiled dilated refinement ({tile_index + 1}/{tile_count})",
-                )
-                blended_tile = blended_tile * (1.0 - dilated_blend) + dilated_tile * dilated_blend
-
-            final_samples[..., y0:y1, x0:x1] = blended_tile
+                    attention_budget_mb=attention_budget_mb,
+                    enable_low_vram=low_vram_enabled,
+                ),
+                description="streaming stage dilated refinement",
+            )
+            blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
 
         out = current_latent_dict.copy()
-        out["samples"] = final_samples
-        next_seed = (seed + tile_count * _SEED_STRIDE) & mask64
+        out["samples"] = blended
+        next_seed = (seed + _SEED_STRIDE) & 0xFFFFFFFFFFFFFFFF
         presampler_latent = latent_payload.copy()
         presampler_latent["samples"] = re_noised
         return (out, presampler_latent, next_seed, model, positive, negative)
@@ -1168,11 +1137,11 @@ class FlowMatchingTiledStage:
 NODE_CLASS_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": FlowMatchingProgressiveUpscaler,
     "FlowMatchingStage": FlowMatchingStage,
-    "FlowMatchingTiledStage": FlowMatchingTiledStage,
+    "FlowMatchingStreamingStage": FlowMatchingStreamingStage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": "Flow Matching Progressive Upscaler",
     "FlowMatchingStage": "Flow Matching Stage",
-    "FlowMatchingTiledStage": "Flow Matching Tiled Stage",
+    "FlowMatchingStreamingStage": "Flow Matching Streaming Stage",
 }

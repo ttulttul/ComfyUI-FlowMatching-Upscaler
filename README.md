@@ -17,10 +17,10 @@ provides additional global coherence.
 
 The progressive upscaler still samples the full latent at once, so extremely
 large resolutions can exhaust VRAM. When you hit that ceiling, switch to the
-`FlowMatchingTiledStage` node introduced in this release. It slices the latent
-into a grid of tiles sized via the `tile_size` parameter (e.g., `0.5` yields two
-halves, `0.25` creates four quadrants) and samples them sequentially to keep
-peak memory in check.
+`FlowMatchingStreamingStage` node. Instead of chopping the latent into tiles, it
+throttles the VRAM budget reported to ComfyUI’s attention kernels and can
+temporarily enable LOW_VRAM streaming so the UNet processes smaller chunks over
+time while keeping global conditioning intact.
 
 ### Note: Upscaling is Optional
 
@@ -96,7 +96,7 @@ A thumbnail preview is rendered on the node while sampling, matching the native 
 ### Modular nodes
 
 For workflows that benefit from ComfyUI’s caching, the repo ships two stage
-nodes: the original `FlowMatchingStage` and the new `FlowMatchingTiledStage`.
+nodes: the original `FlowMatchingStage` and the new `FlowMatchingStreamingStage`.
 Chain multiple stage nodes and feed the output latent from one stage into the
 next; only the stages whose inputs change will be
 recomputed.
@@ -146,20 +146,21 @@ If you keep `reduce_memory_use` enabled, downstream custom logic that inspects
 the upscaled latent while this node runs may observe in-place updates because
 the tensor is shared instead of cloned.
 
-#### FlowMatchingTiledStage
+#### FlowMatchingStreamingStage
 
-The tiled variant mirrors `FlowMatchingStage` but injects an additional
-`tile_size` parameter so you can slice the latent into a grid that fits your
-VRAM budget. The node computes an aspect-aware grid whose cumulative tiles cover
-the full frame:
+The streaming variant mirrors `FlowMatchingStage` but adds controls that let you
+serialize sampling over time without cropping the latent. By limiting the
+reported free VRAM, attention kernels fall back to smaller chunks; optionally
+forcing LOW_VRAM mode streams UNet weights between CPU and GPU.
 
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
-| `tile_size` | FLOAT `0.05 → 1.0` | `0.25` | Target area fraction per tile (`0.5` → two halves, `0.25` → four quadrants, smaller values create finer grids). |
+| `attention_budget_mb` | FLOAT `0.0 → 4096.0` | `0.0` | Maximum VRAM (in MB) reported to attention kernels; lower values increase chunking and reduce peak usage. |
+| `force_low_vram_mode` | enum | `"disable"` | Temporarily sets ComfyUI’s global VRAM state to `LOW_VRAM`, enabling layer streaming at the cost of speed. |
 
 All other inputs and outputs match `FlowMatchingStage`, including optional
-dilated sampling. The node advances the seed once per tile so downstream stages
-receive a deterministic, non-overlapping seed sequence.
+dilated sampling. The node advances the seed once per invocation so downstream
+stages receive deterministic progression.
 
 ## Development
 

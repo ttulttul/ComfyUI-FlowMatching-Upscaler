@@ -24,6 +24,7 @@
   make ultra-high resolutions practical we need an automatic fallback (e.g.
   tiling or attention chunking) when `comfy.model_management` reports
   insufficient VRAM.
-- Deriving an aspect-aware tile grid from a `tile_size` fraction lets the tiled
-  stage sample massive latents sequentially while advancing seeds per tile so
-  downstream chaining stays deterministic.
+- Throttling the reported free VRAM (and optionally forcing LOW_VRAM streaming)
+  nudges ComfyUI’s attention kernels into smaller chunks, letting the stage keep
+  global conditioning intact while stretching sampling time to fit tight memory
+  budgets.

@@ -82,7 +82,7 @@ _install_test_stubs()
 
 import src.flow_matching_upscaler as fm_upscaler  # noqa: E402
 from src.flow_matching_upscaler import FlowMatchingProgressiveUpscaler  # noqa: E402
-from src.flow_matching_upscaler import FlowMatchingTiledStage  # noqa: E402
+from src.flow_matching_upscaler import FlowMatchingStreamingStage  # noqa: E402
 
 
 class FlowMatchingUpscalerTests(unittest.TestCase):
@@ -398,32 +398,39 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertEqual(tuple(presampler_latent["samples"].shape[-2:]), (16, 16))
 
 
-class FlowMatchingTiledStageTests(unittest.TestCase):
+class FlowMatchingStreamingStageTests(unittest.TestCase):
     def setUp(self):
-        self.node = FlowMatchingTiledStage()
+        self.node = FlowMatchingStreamingStage()
         self.default_sampler = FlowMatchingProgressiveUpscaler._SAMPLERS[0]
         self.default_scheduler = FlowMatchingProgressiveUpscaler._SCHEDULERS[0]
 
-    def test_half_tile_size_splits_landscape_in_two(self):
-        base_latent = {"samples": torch.ones((1, 4, 8, 16), dtype=torch.float32)}
-        call_shapes = []
+    def test_attention_budget_limits_reported_memory(self):
+        base_latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
+        recorded_free = []
 
         def fake_run_sampler(**kwargs):
-            latent_payload = kwargs["latent_template"]
-            tile_samples = latent_payload["samples"]
-            call_shapes.append(tuple(tile_samples.shape[-2:]))
-            result = latent_payload.copy()
-            result["samples"] = torch.zeros_like(tile_samples)
+            free = fm_upscaler.model_management.get_free_memory()
+            recorded_free.append(free)
+            payload = kwargs["latent_template"]
+            result = payload.copy()
+            result["samples"] = torch.zeros_like(payload["samples"])
             return result
 
-        with mock.patch.object(fm_upscaler, "run_sampler", new=fake_run_sampler):
-            output, presampler, next_seed, *_ = self.node.execute(
-                model=object(),
-                positive=[],
-                negative=[],
-                latent=base_latent,
+        def stub_free_memory(dev=None, torch_free_too=False):
+            value = 512 * 1024 * 1024
+            if torch_free_too:
+                return value, value // 4
+            return value
+
+        with mock.patch.object(fm_upscaler.model_management, "get_free_memory", new=stub_free_memory):
+            with mock.patch.object(fm_upscaler, "run_sampler", new=fake_run_sampler):
+                output, presampler, next_seed, *_ = self.node.execute(
+                    model=object(),
+                    positive=[],
+                    negative=[],
+                    latent=base_latent,
                 seed=21,
-                steps=3,
+                steps=4,
                 cfg=2.0,
                 sampler_name=self.default_sampler,
                 scheduler=self.default_scheduler,
@@ -432,61 +439,67 @@ class FlowMatchingTiledStageTests(unittest.TestCase):
                 skip_blend=0.0,
                 denoise=1.0,
                 upscale_method="nearest-exact",
-                tile_size=0.5,
+                attention_budget_mb=64.0,
                 enable_dilated_sampling="disable",
                 reduce_memory_use="enable",
                 dilated_downscale=2.0,
                 dilated_blend=0.25,
             )
 
-        self.assertEqual(call_shapes, [(8, 8), (8, 8)])
-        self.assertEqual(tuple(output["samples"].shape[-2:]), (8, 16))
-        self.assertEqual(tuple(presampler["samples"].shape[-2:]), (8, 16))
+        self.assertEqual(recorded_free, [64 * 1024 * 1024])
+        self.assertEqual(tuple(output["samples"].shape[-2:]), (8, 8))
+        self.assertEqual(tuple(presampler["samples"].shape[-2:]), (8, 8))
         mask64 = 0xFFFFFFFFFFFFFFFF
-        expected_seed = (21 + 2 * fm_upscaler._SEED_STRIDE) & mask64
-        self.assertEqual(next_seed, expected_seed)
+        self.assertEqual(next_seed, (21 + fm_upscaler._SEED_STRIDE) & mask64)
+        self.assertIs(fm_upscaler.model_management.get_free_memory, stub_free_memory)
 
-    def test_quadrant_split_for_quarter_tile_size(self):
-        base_latent = {"samples": torch.ones((1, 4, 16, 8), dtype=torch.float32)}
-        observed_tiles = []
+    def test_low_vram_toggle_restores_state(self):
+        base_latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
+        recorded_states = []
 
         def fake_run_sampler(**kwargs):
-            latent_payload = kwargs["latent_template"]
-            samples = latent_payload["samples"]
-            observed_tiles.append(tuple(samples.shape[-2:]))
-            result = latent_payload.copy()
-            result["samples"] = torch.full_like(samples, 5.0)
+            recorded_states.append(fm_upscaler.model_management.vram_state)
+            payload = kwargs["latent_template"]
+            result = payload.copy()
+            result["samples"] = torch.zeros_like(payload["samples"])
             return result
 
-        with mock.patch.object(fm_upscaler, "run_sampler", new=fake_run_sampler):
-            output, presampler, next_seed, *_ = self.node.execute(
-                model=object(),
-                positive=[],
-                negative=[],
-                latent=base_latent,
-                seed=99,
-                steps=1,
-                cfg=1.0,
-                sampler_name=self.default_sampler,
-                scheduler=self.default_scheduler,
-                scale_factor=1.0,
-                noise_ratio=0.0,
-                skip_blend=0.5,
-                denoise=1.0,
-                upscale_method="nearest-exact",
-                tile_size=0.25,
-                enable_dilated_sampling="disable",
-                reduce_memory_use="enable",
-                dilated_downscale=2.0,
-                dilated_blend=0.25,
-            )
+        previous_state = fm_upscaler.model_management.vram_state
+        fm_upscaler.model_management.vram_state = fm_upscaler.model_management.VRAMState.NORMAL_VRAM
 
-        self.assertEqual(observed_tiles, [(8, 4), (8, 4), (8, 4), (8, 4)])
-        self.assertTrue(torch.allclose(output["samples"], torch.full_like(output["samples"], 2.5)))
-        self.assertEqual(tuple(presampler["samples"].shape[-2:]), (16, 8))
+        try:
+            with mock.patch.object(fm_upscaler, "run_sampler", new=fake_run_sampler):
+                output, _, next_seed, *_ = self.node.execute(
+                    model=object(),
+                    positive=[],
+                    negative=[],
+                    latent=base_latent,
+                    seed=7,
+                    steps=2,
+                    cfg=1.0,
+                    sampler_name=self.default_sampler,
+                    scheduler=self.default_scheduler,
+                    scale_factor=1.0,
+                    noise_ratio=0.0,
+                    skip_blend=0.0,
+                    denoise=1.0,
+                    upscale_method="nearest-exact",
+                    attention_budget_mb=0.0,
+                    enable_dilated_sampling="disable",
+                    reduce_memory_use="enable",
+                    dilated_downscale=2.0,
+                    dilated_blend=0.25,
+                    force_low_vram_mode="enable",
+                )
+        finally:
+            restored_state = fm_upscaler.model_management.vram_state
+            fm_upscaler.model_management.vram_state = previous_state
+
+        self.assertEqual(recorded_states, [fm_upscaler.model_management.VRAMState.LOW_VRAM])
+        self.assertEqual(restored_state, fm_upscaler.model_management.VRAMState.NORMAL_VRAM)
         mask64 = 0xFFFFFFFFFFFFFFFF
-        expected_seed = (99 + 4 * fm_upscaler._SEED_STRIDE) & mask64
-        self.assertEqual(next_seed, expected_seed)
+        self.assertEqual(next_seed, (7 + fm_upscaler._SEED_STRIDE) & mask64)
+        self.assertEqual(tuple(output["samples"].shape[-2:]), (8, 8))
 
 
 if __name__ == "__main__":
