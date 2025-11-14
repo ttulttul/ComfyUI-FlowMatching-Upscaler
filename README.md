@@ -153,6 +153,16 @@ serialize sampling over time without cropping the latent. By limiting the
 reported free VRAM, attention kernels fall back to smaller chunks; optionally
 forcing LOW_VRAM mode streams UNet weights between CPU and GPU.
 
+The “streaming” name reflects how ComfyUI executes the pass internally. The node
+temporarily reports a much smaller free-memory budget to
+`model_management.get_free_memory`, so the attention kernels in
+`comfy/ldm/modules/attention.py` chunk their work and iterate over the full
+latent in sequence. When `force_low_vram_mode` is enabled we also flip
+`model_management.vram_state` to `LOW_VRAM`, letting ComfyUI offload UNet blocks
+between CPU and GPU. Taken together, the model processes the entire latent with
+its original conditioning while stretching the computation over time rather than
+over space.
+
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
 | `attention_budget_mb` | FLOAT `0.0 → 4096.0` | `0.0` | Maximum VRAM (in MB) reported to attention kernels; lower values increase chunking and reduce peak usage. |
