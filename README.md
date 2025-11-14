@@ -154,10 +154,11 @@ computation while preserving global conditioning.
 
 ### Running tests
 
-Use the standard library test runner:
+Use `pytest`; the suite installs lightweight `comfy` and `nodes` stubs so it can
+run outside of a live ComfyUI process:
 
 ```bash
-python -m unittest discover -s tests
+pytest
 ```
 
 ### Logging

@@ -28,3 +28,6 @@
   nudges ComfyUI’s attention kernels into smaller chunks; wiring this in as an
   automatic fallback keeps the full-scene conditioning intact while stretching
   sampling time to fit tight memory budgets.
+- When running tests outside ComfyUI we must hydrate comprehensive stubs for
+  `comfy.utils` and `comfy.model_management` (including VRAM controls and
+  samplers) so the node module imports successfully without ComfyUI’s runtime.
