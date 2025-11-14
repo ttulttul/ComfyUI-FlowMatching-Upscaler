@@ -2,7 +2,7 @@
 name = "comfyui-flowmatching-upscaler"
 description = ""
 dependencies = ["numpy>=2.0", "torch>=2.1", "einops>=0.6", "aiohttp>=3.9"]
-version = "1.0.0"
+version = "1.0.1"
 license = "LICENSE"
 classifiers = [
     "Operating System :: OS Independent",
