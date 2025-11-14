@@ -31,3 +31,6 @@
 - When running tests outside ComfyUI we must hydrate comprehensive stubs for
   `comfy.utils` and `comfy.model_management` (including VRAM controls and
   samplers) so the node module imports successfully without ComfyUI’s runtime.
+- Channel-wise diagnostics surfaced via DEBUG logging helped confirm that the
+  skip and dilated blends maintain stable statistics across the 16 latent
+  channels, providing a foundation for future per-channel mixing experiments.

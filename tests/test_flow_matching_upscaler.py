@@ -444,3 +444,14 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertEqual(next_seed, (123 + fm_upscaler._SEED_STRIDE) & mask64)
         self.assertEqual(tuple(output_latent["samples"].shape[-2:]), (8, 8))
         self.assertEqual(tuple(presampler_latent["samples"].shape[-2:]), (8, 8))
+
+    def test_channel_stats_logging_emits_debug_diagnostics(self):
+        tensor = torch.arange(0, 64, dtype=torch.float32).reshape(1, 4, 4, 4)
+
+        with self.assertLogs(fm_upscaler.logger, level="DEBUG") as captured:
+            fm_upscaler._log_channel_stats("diagnostic-test", tensor)
+
+        self.assertTrue(
+            any("diagnostic-test channel stats" in message for message in captured.output),
+            msg=f"Expected diagnostic log entry, got: {captured.output}",
+        )

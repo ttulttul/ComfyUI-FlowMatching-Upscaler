@@ -185,6 +185,49 @@ def _prepare_latent_for_sampler(latent_dict: dict) -> Tuple[dict, callable]:
     return latent_dict, lambda tensor: tensor
 
 
+def _log_channel_stats(label: str, tensor: torch.Tensor, *, limit: int = 16) -> None:
+    """
+    Emit per-channel mean and standard deviation diagnostics for the provided tensor.
+    Limited to the first `limit` channels to keep log volume manageable.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    if not isinstance(tensor, torch.Tensor):
+        logger.debug("%s channel stats unavailable (not a tensor).", label)
+        return
+    if tensor.ndim < 2:
+        logger.debug("%s channel stats unavailable (shape=%s).", label, tuple(tensor.shape))
+        return
+
+    with torch.no_grad():
+        data = tensor.detach()
+        if data.shape[1] == 0:
+            logger.debug("%s channel stats unavailable (zero channels).", label)
+            return
+
+        reduce_dims = tuple(dim for dim in range(data.ndim) if dim != 1)
+        channel_means = data.float().mean(dim=reduce_dims)
+        channel_stds = data.float().std(dim=reduce_dims, unbiased=False)
+
+        mean_vals = channel_means.detach().cpu().tolist()
+        std_vals = channel_stds.detach().cpu().tolist()
+
+        entries = []
+        for idx, (mean_val, std_val) in enumerate(zip(mean_vals, std_vals)):
+            if idx >= limit:
+                break
+            entries.append(f"c{idx}: {mean_val:.4f}±{std_val:.4f}")
+        if len(mean_vals) > limit:
+            entries.append("...")
+
+        logger.debug(
+            "%s channel stats (%d ch): %s",
+            label,
+            len(mean_vals),
+            "; ".join(entries),
+        )
+
+
 @contextmanager
 def _temporary_low_vram_mode(enabled: bool):
     """
@@ -326,6 +369,7 @@ def dilated_refinement(
         return base_latent["samples"]
 
     samples = base_latent["samples"]
+    _log_channel_stats("dilated_refinement/input", samples)
     if downscale_factor <= 1.0:
         return samples
 
@@ -353,6 +397,7 @@ def dilated_refinement(
         down_height,
         downscale_factor,
     )
+    _log_channel_stats("dilated_refinement/downsampled", downsampled)
 
     sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_copy)
 
@@ -374,6 +419,8 @@ def dilated_refinement(
         refined_down = refined_down.copy()
         refined_down["samples"] = restored_samples
 
+    _log_channel_stats("dilated_refinement/refined", refined_down["samples"])
+
     upsampled = comfy.utils.common_upscale(
         refined_down["samples"],
         samples.shape[-1],
@@ -382,7 +429,10 @@ def dilated_refinement(
         crop="disabled",
     )
 
+    _log_channel_stats("dilated_refinement/upsampled", upsampled)
+
     merged = samples * (1.0 - blend) + upsampled * blend
+    _log_channel_stats("dilated_refinement/merged", merged)
     return merged
 
 
@@ -680,6 +730,11 @@ class FlowMatchingProgressiveUpscaler:
         total_stage_count = len(stage_configs)
 
         for stage_index, stage in enumerate(stage_configs):
+            stage_label = (
+                "cleanup stage"
+                if stage.is_cleanup
+                else f"progressive stage {min(stage_index + 1, main_stage_count)}/{main_stage_count}"
+            )
             if stage.is_cleanup:
                 logger.info(
                     "Cleanup stage -> noise=%.3f denoise=%.3f steps=%d",
@@ -699,6 +754,8 @@ class FlowMatchingProgressiveUpscaler:
                     stage.steps,
                 )
 
+            _log_channel_stats(f"{stage_label} input", current_latent)
+
             upscaled = progressive_upscale_latent(
                 current_latent,
                 stage.scale_factor,
@@ -706,18 +763,18 @@ class FlowMatchingProgressiveUpscaler:
             )
 
             skip_reference = upscaled
+            _log_channel_stats(f"{stage_label} skip_reference", skip_reference)
             re_noised = apply_flow_renoise(
                 upscaled,
                 stage.noise_level,
                 stage.seed,
             )
+            _log_channel_stats(f"{stage_label} renoised", re_noised)
 
             latent_payload = current_latent_dict.copy()
             latent_payload["samples"] = re_noised
 
             sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_payload)
-
-            stage_label = f"progressive stage {stage_index + 1}/{main_stage_count}"
 
             refined_dict = _run_with_oom_retry(
                 lambda: run_sampler(
@@ -749,11 +806,14 @@ class FlowMatchingProgressiveUpscaler:
                     crop="disabled",
                 )
 
+            _log_channel_stats(f"{stage_label} refined", refined_samples)
             blended = skip_reference * stage.skip_blend + refined_samples * (1.0 - stage.skip_blend)
+            _log_channel_stats(f"{stage_label} blended", blended)
 
             if enable_dilated_sampling == "enable" and not stage.is_cleanup:
                 blended_dict = refined_dict.copy()
                 blended_dict["samples"] = blended
+                _log_channel_stats(f"{stage_label} dilated/base", blended)
                 dilated = _run_with_oom_retry(
                     lambda: dilated_refinement(
                         model=model,
@@ -771,7 +831,9 @@ class FlowMatchingProgressiveUpscaler:
                     ),
                     description=f"{stage_label} dilated refinement",
                 )
+                _log_channel_stats(f"{stage_label} dilated/result", dilated)
                 blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
+                _log_channel_stats(f"{stage_label} dilated/merged", blended)
 
             current_latent = blended
             current_latent_dict["samples"] = current_latent

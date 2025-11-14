@@ -165,3 +165,6 @@ pytest
 
 The node uses Python's `logging` subsystem (`logging.getLogger(__name__)`) so it
 respects ComfyUI's runtime logging configuration.
+Enabling DEBUG level now emits per-channel mean and standard deviation
+diagnostics around skip/dilated blending steps, which is handy when probing how
+the 16-channel Qwen latent space behaves through the pipeline.
