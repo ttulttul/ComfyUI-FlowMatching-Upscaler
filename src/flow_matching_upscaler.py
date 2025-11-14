@@ -16,6 +16,7 @@ from nodes import common_ksampler
 logger = logging.getLogger(__name__)
 
 _SEED_STRIDE = 0x9E3779B97F4A7C15  # 64-bit golden ratio constant
+_STREAMING_ATTENTION_BUDGET_MB = 256.0
 
 
 @dataclass(frozen=True)
@@ -240,6 +241,13 @@ def _execute_with_memory_controls(
         if attention_budget_mb > 0.0:
             stack.enter_context(_throttled_attention_budget(attention_budget_mb))
         return operation()
+
+
+def _is_oom_exception(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return isinstance(exc, model_management.OOM_EXCEPTION) or (
+        isinstance(exc, RuntimeError) and "out of memory" in message
+    )
 
 
 def run_sampler(
@@ -892,120 +900,45 @@ class FlowMatchingStage:
         dilated_blend=0.25,
     ):
         skip_blend = max(0.0, min(1.0, skip_blend))
+        reduce_memory_flag = reduce_memory_use == "enable"
+        streaming_enabled = False
 
-        current_latent_dict = latent.copy()
-        current_latent = current_latent_dict["samples"]
+        while True:
+            try:
+                return self._execute_single_pass(
+                    model=model,
+                    positive=positive,
+                    negative=negative,
+                    latent=latent,
+                    seed=seed,
+                    steps=steps,
+                    cfg=cfg,
+                    sampler_name=sampler_name,
+                    scheduler=scheduler,
+                    scale_factor=scale_factor,
+                    noise_ratio=noise_ratio,
+                    skip_blend=skip_blend,
+                    denoise=denoise,
+                    upscale_method=upscale_method,
+                    enable_dilated_sampling=enable_dilated_sampling,
+                    reduce_memory_flag=reduce_memory_flag,
+                    dilated_downscale=dilated_downscale,
+                    dilated_blend=dilated_blend,
+                    streaming_enabled=streaming_enabled,
+                )
+            except BaseException as exc:
+                if not _is_oom_exception(exc) or streaming_enabled:
+                    raise
+                logger.warning(
+                    "Out of memory during stage sampling; enabling low-VRAM streaming fallback.",
+                    exc_info=True,
+                )
+                streaming_enabled = True
+                reduce_memory_flag = True
 
-        upscaled = progressive_upscale_latent(
-            current_latent,
-            scale_factor,
-            method=upscale_method,
-        )
-
-        if reduce_memory_use == "enable":
-            # Reuse the upscaled tensor to avoid holding two full-resolution copies.
-            skip_reference = upscaled
-        else:
-            skip_reference = upscaled.clone()
-
-        re_noised = apply_flow_renoise(
-            upscaled,
-            noise_ratio,
-            seed,
-        )
-
-        latent_payload = current_latent_dict.copy()
-        latent_payload["samples"] = re_noised
-
-        sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_payload)
-
-        refined_dict = run_sampler(
-            model=model,
-            positive=positive,
-            negative=negative,
-            latent_template=sampler_payload,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            cfg=cfg,
-            steps=steps,
-            seed=seed,
-            denoise=denoise,
-        )
-
-        restored_samples = restore_fn(refined_dict["samples"])
-        if restored_samples is not refined_dict["samples"]:
-            refined_dict = refined_dict.copy()
-            refined_dict["samples"] = restored_samples
-        refined_samples = refined_dict["samples"]
-        if refined_samples.shape != skip_reference.shape:
-            refined_samples = comfy.utils.common_upscale(
-                refined_samples,
-                skip_reference.shape[-1],
-                skip_reference.shape[-2],
-                "bilinear",
-                crop="disabled",
-            )
-
-        blended = skip_reference * skip_blend + refined_samples * (1.0 - skip_blend)
-
-        if enable_dilated_sampling == "enable":
-            blended_dict = refined_dict.copy()
-            blended_dict["samples"] = blended
-            dilated = dilated_refinement(
-                model=model,
-                positive=positive,
-                negative=negative,
-                sampler_name=sampler_name,
-                scheduler=scheduler,
-                cfg=cfg,
-                steps=steps,
-                seed=seed,
-                denoise=denoise,
-                base_latent=blended_dict,
-                downscale_factor=max(1.0, float(dilated_downscale)),
-                blend=dilated_blend,
-            )
-            blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
-
-        out = current_latent_dict.copy()
-        out["samples"] = blended
-        next_seed = (seed + _SEED_STRIDE) & 0xFFFFFFFFFFFFFFFF
-        presampler_latent = latent_payload.copy()
-        presampler_latent["samples"] = re_noised
-        return (out, presampler_latent, next_seed, model, positive, negative)
-
-
-class FlowMatchingStreamingStage:
-    CATEGORY = FlowMatchingStage.CATEGORY
-    FUNCTION = "execute"
-    RETURN_TYPES = FlowMatchingStage.RETURN_TYPES
-    RETURN_NAMES = FlowMatchingStage.RETURN_NAMES
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        base = FlowMatchingStage.INPUT_TYPES()
-        required = dict(base["required"])
-        optional = dict(base.get("optional", {}))
-        required["attention_budget_mb"] = (
-            "FLOAT",
-            {
-                "default": 0.0,
-                "min": 0.0,
-                "max": 4096.0,
-                "step": 16.0,
-                "round": 0.1,
-            },
-        )
-        optional["force_low_vram_mode"] = (
-            ["disable", "enable"],
-            {
-                "default": "disable",
-            },
-        )
-        return {"required": required, "optional": optional}
-
-    def execute(
+    def _execute_single_pass(
         self,
+        *,
         model,
         positive,
         negative,
@@ -1020,17 +953,12 @@ class FlowMatchingStreamingStage:
         skip_blend,
         denoise,
         upscale_method,
-        attention_budget_mb,
-        enable_dilated_sampling="disable",
-        reduce_memory_use="enable",
-        dilated_downscale=2.0,
-        dilated_blend=0.25,
-        force_low_vram_mode="disable",
+        enable_dilated_sampling,
+        reduce_memory_flag: bool,
+        dilated_downscale,
+        dilated_blend,
+        streaming_enabled: bool,
     ):
-        skip_blend = max(0.0, min(1.0, skip_blend))
-        attention_budget_mb = max(0.0, float(attention_budget_mb))
-        low_vram_enabled = force_low_vram_mode == "enable"
-
         current_latent_dict = latent.copy()
         current_latent = current_latent_dict["samples"]
 
@@ -1040,7 +968,7 @@ class FlowMatchingStreamingStage:
             method=upscale_method,
         )
 
-        if reduce_memory_use == "enable":
+        if reduce_memory_flag:
             skip_reference = upscaled
         else:
             skip_reference = upscaled.clone()
@@ -1056,11 +984,15 @@ class FlowMatchingStreamingStage:
 
         sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_payload)
 
-        if attention_budget_mb > 0.0 or low_vram_enabled:
+        attention_budget = _STREAMING_ATTENTION_BUDGET_MB if streaming_enabled else 0.0
+        low_vram = streaming_enabled
+        description = "stage sampling (streaming fallback)" if streaming_enabled else "stage sampling"
+
+        if streaming_enabled:
             logger.info(
-                "Streaming stage sampling (attention budget %.1f MB, low_vram=%s).",
-                attention_budget_mb,
-                low_vram_enabled,
+                "Stage fallback enabled (attention budget %.1f MB, low_vram=%s).",
+                attention_budget,
+                low_vram,
             )
 
         refined_dict = _run_with_oom_retry(
@@ -1077,18 +1009,17 @@ class FlowMatchingStreamingStage:
                     seed=seed,
                     denoise=denoise,
                 ),
-                attention_budget_mb=attention_budget_mb,
-                enable_low_vram=low_vram_enabled,
+                attention_budget_mb=attention_budget,
+                enable_low_vram=low_vram,
             ),
-            description="streaming stage sampling",
+            description=description,
         )
 
-        refined_samples = restore_fn(refined_dict["samples"])
-        if refined_samples is not refined_dict["samples"]:
+        restored_samples = restore_fn(refined_dict["samples"])
+        if restored_samples is not refined_dict["samples"]:
             refined_dict = refined_dict.copy()
-            refined_dict["samples"] = refined_samples
+            refined_dict["samples"] = restored_samples
         refined_samples = refined_dict["samples"]
-
         if refined_samples.shape != skip_reference.shape:
             refined_samples = comfy.utils.common_upscale(
                 refined_samples,
@@ -1119,10 +1050,10 @@ class FlowMatchingStreamingStage:
                         downscale_factor=max(1.0, float(dilated_downscale)),
                         blend=dilated_blend,
                     ),
-                    attention_budget_mb=attention_budget_mb,
-                    enable_low_vram=low_vram_enabled,
+                    attention_budget_mb=attention_budget,
+                    enable_low_vram=low_vram,
                 ),
-                description="streaming stage dilated refinement",
+                description="stage dilated refinement" + (" (streaming fallback)" if streaming_enabled else ""),
             )
             blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
 
@@ -1137,11 +1068,9 @@ class FlowMatchingStreamingStage:
 NODE_CLASS_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": FlowMatchingProgressiveUpscaler,
     "FlowMatchingStage": FlowMatchingStage,
-    "FlowMatchingStreamingStage": FlowMatchingStreamingStage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": "Flow Matching Progressive Upscaler",
     "FlowMatchingStage": "Flow Matching Stage",
-    "FlowMatchingStreamingStage": "Flow Matching Streaming Stage",
 }

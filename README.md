@@ -16,11 +16,11 @@ provides additional global coherence.
 ### Memory Use
 
 The progressive upscaler still samples the full latent at once, so extremely
-large resolutions can exhaust VRAM. When you hit that ceiling, switch to the
-`FlowMatchingStreamingStage` node. Instead of chopping the latent into tiles, it
-throttles the VRAM budget reported to ComfyUI’s attention kernels and can
-temporarily enable LOW_VRAM streaming so the UNet processes smaller chunks over
-time while keeping global conditioning intact.
+large resolutions can exhaust VRAM. When the sampler reports an out-of-memory
+error, the node automatically retries with a streaming fallback: it enables
+LOW_VRAM mode and throttles the VRAM budget reported to ComfyUI’s attention
+kernels so the UNet iterates over smaller chunks while preserving the full
+latent and conditioning. Expect a slower pass, but no need to rewire the graph.
 
 ### Note: Upscaling is Optional
 
@@ -95,10 +95,10 @@ A thumbnail preview is rendered on the node while sampling, matching the native 
 
 ### Modular nodes
 
-For workflows that benefit from ComfyUI’s caching, the repo ships two stage
-nodes: the original `FlowMatchingStage` and the new `FlowMatchingStreamingStage`.
-Chain multiple stage nodes and feed the output latent from one stage into the
-next; only the stages whose inputs change will be
+For workflows that benefit from ComfyUI’s caching, the repo ships the
+`FlowMatchingStage` node alongside the composite progressive upscaler. Chain
+multiple stage nodes and feed the output latent from one stage into the next; only
+the stages whose inputs change will be
 recomputed.
 
 #### FlowMatchingStage
@@ -145,32 +145,10 @@ the subsequent stage’s `seed` input to maintain deterministic noise progressio
 If you keep `reduce_memory_use` enabled, downstream custom logic that inspects
 the upscaled latent while this node runs may observe in-place updates because
 the tensor is shared instead of cloned.
-
-#### FlowMatchingStreamingStage
-
-The streaming variant mirrors `FlowMatchingStage` but adds controls that let you
-serialize sampling over time without cropping the latent. By limiting the
-reported free VRAM, attention kernels fall back to smaller chunks; optionally
-forcing LOW_VRAM mode streams UNet weights between CPU and GPU.
-
-The “streaming” name reflects how ComfyUI executes the pass internally. The node
-temporarily reports a much smaller free-memory budget to
-`model_management.get_free_memory`, so the attention kernels in
-`comfy/ldm/modules/attention.py` chunk their work and iterate over the full
-latent in sequence. When `force_low_vram_mode` is enabled we also flip
-`model_management.vram_state` to `LOW_VRAM`, letting ComfyUI offload UNet blocks
-between CPU and GPU. Taken together, the model processes the entire latent with
-its original conditioning while stretching the computation over time rather than
-over space.
-
-| Field | Type | Default | Purpose |
-|-------|------|---------|---------|
-| `attention_budget_mb` | FLOAT `0.0 → 4096.0` | `0.0` | Maximum VRAM (in MB) reported to attention kernels; lower values increase chunking and reduce peak usage. |
-| `force_low_vram_mode` | enum | `"disable"` | Temporarily sets ComfyUI’s global VRAM state to `LOW_VRAM`, enabling layer streaming at the cost of speed. |
-
-All other inputs and outputs match `FlowMatchingStage`, including optional
-dilated sampling. The node advances the seed once per invocation so downstream
-stages receive deterministic progression.
+If a stage hits an out-of-memory condition, it retries automatically with the
+same streaming fallback as the progressive node: LOW_VRAM mode is temporarily
+enabled and attention kernels see a capped free-memory budget so they chunk the
+computation while preserving global conditioning.
 
 ## Development
 

@@ -24,7 +24,7 @@
   make ultra-high resolutions practical we need an automatic fallback (e.g.
   tiling or attention chunking) when `comfy.model_management` reports
   insufficient VRAM.
-- Throttling the reported free VRAM (and optionally forcing LOW_VRAM streaming)
-  nudges ComfyUI’s attention kernels into smaller chunks, letting the stage keep
-  global conditioning intact while stretching sampling time to fit tight memory
-  budgets.
+- Throttling the reported free VRAM (and temporarily forcing LOW_VRAM streaming)
+  nudges ComfyUI’s attention kernels into smaller chunks; wiring this in as an
+  automatic fallback keeps the full-scene conditioning intact while stretching
+  sampling time to fit tight memory budgets.

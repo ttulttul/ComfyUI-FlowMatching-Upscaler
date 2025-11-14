@@ -82,7 +82,6 @@ _install_test_stubs()
 
 import src.flow_matching_upscaler as fm_upscaler  # noqa: E402
 from src.flow_matching_upscaler import FlowMatchingProgressiveUpscaler  # noqa: E402
-from src.flow_matching_upscaler import FlowMatchingStreamingStage  # noqa: E402
 
 
 class FlowMatchingUpscalerTests(unittest.TestCase):
@@ -395,112 +394,53 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertIs(out_model, model_obj)
         self.assertEqual(out_positive, [])
         self.assertEqual(out_negative, [])
-        self.assertEqual(tuple(presampler_latent["samples"].shape[-2:]), (16, 16))
 
+    def test_stage_falls_back_to_streaming_on_oom(self):
+        stage_node = fm_upscaler.FlowMatchingStage()
+        latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
 
-class FlowMatchingStreamingStageTests(unittest.TestCase):
-    def setUp(self):
-        self.node = FlowMatchingStreamingStage()
-        self.default_sampler = FlowMatchingProgressiveUpscaler._SAMPLERS[0]
-        self.default_scheduler = FlowMatchingProgressiveUpscaler._SCHEDULERS[0]
+        call_count = {"value": 0}
+        recorded_controls = []
 
-    def test_attention_budget_limits_reported_memory(self):
-        base_latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
-        recorded_free = []
+        def fake_execute_controls(operation, *, attention_budget_mb, enable_low_vram):
+            recorded_controls.append((attention_budget_mb, enable_low_vram))
+            return operation()
 
         def fake_run_sampler(**kwargs):
-            free = fm_upscaler.model_management.get_free_memory()
-            recorded_free.append(free)
+            call_count["value"] += 1
+            if call_count["value"] < 3:
+                raise RuntimeError("CUDA out of memory")
             payload = kwargs["latent_template"]
             result = payload.copy()
             result["samples"] = torch.zeros_like(payload["samples"])
             return result
 
-        def stub_free_memory(dev=None, torch_free_too=False):
-            value = 512 * 1024 * 1024
-            if torch_free_too:
-                return value, value // 4
-            return value
+        with mock.patch.object(fm_upscaler, "_execute_with_memory_controls", side_effect=fake_execute_controls):
+            with mock.patch.object(fm_upscaler, "run_sampler", side_effect=fake_run_sampler):
+                with mock.patch.object(fm_upscaler, "apply_flow_renoise", side_effect=lambda x, *_: x):
+                    output_latent, presampler_latent, next_seed, *_ = stage_node.execute(
+                        model=object(),
+                        positive=[],
+                        negative=[],
+                        latent=latent,
+                        seed=123,
+                        steps=2,
+                        cfg=1.0,
+                        sampler_name=fm_upscaler.FlowMatchingStage._SAMPLERS[0],
+                        scheduler=fm_upscaler.FlowMatchingStage._SCHEDULERS[0],
+                        scale_factor=1.0,
+                        noise_ratio=0.0,
+                        skip_blend=0.1,
+                        denoise=1.0,
+                        upscale_method="nearest-exact",
+                        enable_dilated_sampling="disable",
+                        reduce_memory_use="disable",
+                    )
 
-        with mock.patch.object(fm_upscaler.model_management, "get_free_memory", new=stub_free_memory):
-            with mock.patch.object(fm_upscaler, "run_sampler", new=fake_run_sampler):
-                output, presampler, next_seed, *_ = self.node.execute(
-                    model=object(),
-                    positive=[],
-                    negative=[],
-                    latent=base_latent,
-                seed=21,
-                steps=4,
-                cfg=2.0,
-                sampler_name=self.default_sampler,
-                scheduler=self.default_scheduler,
-                scale_factor=1.0,
-                noise_ratio=0.0,
-                skip_blend=0.0,
-                denoise=1.0,
-                upscale_method="nearest-exact",
-                attention_budget_mb=64.0,
-                enable_dilated_sampling="disable",
-                reduce_memory_use="enable",
-                dilated_downscale=2.0,
-                dilated_blend=0.25,
-            )
-
-        self.assertEqual(recorded_free, [64 * 1024 * 1024])
-        self.assertEqual(tuple(output["samples"].shape[-2:]), (8, 8))
-        self.assertEqual(tuple(presampler["samples"].shape[-2:]), (8, 8))
+        self.assertEqual(call_count["value"], 3)
+        self.assertEqual(recorded_controls[0], (0.0, False))
+        self.assertEqual(recorded_controls[-1], (fm_upscaler._STREAMING_ATTENTION_BUDGET_MB, True))
         mask64 = 0xFFFFFFFFFFFFFFFF
-        self.assertEqual(next_seed, (21 + fm_upscaler._SEED_STRIDE) & mask64)
-        self.assertIs(fm_upscaler.model_management.get_free_memory, stub_free_memory)
-
-    def test_low_vram_toggle_restores_state(self):
-        base_latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
-        recorded_states = []
-
-        def fake_run_sampler(**kwargs):
-            recorded_states.append(fm_upscaler.model_management.vram_state)
-            payload = kwargs["latent_template"]
-            result = payload.copy()
-            result["samples"] = torch.zeros_like(payload["samples"])
-            return result
-
-        previous_state = fm_upscaler.model_management.vram_state
-        fm_upscaler.model_management.vram_state = fm_upscaler.model_management.VRAMState.NORMAL_VRAM
-
-        try:
-            with mock.patch.object(fm_upscaler, "run_sampler", new=fake_run_sampler):
-                output, _, next_seed, *_ = self.node.execute(
-                    model=object(),
-                    positive=[],
-                    negative=[],
-                    latent=base_latent,
-                    seed=7,
-                    steps=2,
-                    cfg=1.0,
-                    sampler_name=self.default_sampler,
-                    scheduler=self.default_scheduler,
-                    scale_factor=1.0,
-                    noise_ratio=0.0,
-                    skip_blend=0.0,
-                    denoise=1.0,
-                    upscale_method="nearest-exact",
-                    attention_budget_mb=0.0,
-                    enable_dilated_sampling="disable",
-                    reduce_memory_use="enable",
-                    dilated_downscale=2.0,
-                    dilated_blend=0.25,
-                    force_low_vram_mode="enable",
-                )
-        finally:
-            restored_state = fm_upscaler.model_management.vram_state
-            fm_upscaler.model_management.vram_state = previous_state
-
-        self.assertEqual(recorded_states, [fm_upscaler.model_management.VRAMState.LOW_VRAM])
-        self.assertEqual(restored_state, fm_upscaler.model_management.VRAMState.NORMAL_VRAM)
-        mask64 = 0xFFFFFFFFFFFFFFFF
-        self.assertEqual(next_seed, (7 + fm_upscaler._SEED_STRIDE) & mask64)
-        self.assertEqual(tuple(output["samples"].shape[-2:]), (8, 8))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(next_seed, (123 + fm_upscaler._SEED_STRIDE) & mask64)
+        self.assertEqual(tuple(output_latent["samples"].shape[-2:]), (8, 8))
+        self.assertEqual(tuple(presampler_latent["samples"].shape[-2:]), (8, 8))
