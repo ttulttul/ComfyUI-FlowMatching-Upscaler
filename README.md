@@ -141,15 +141,49 @@ repeating artifacts or the blurry look of standard upscaling.
 | `cleanup_noise` | FLOAT `0.0 → 1.0` | `0.0` | Noise ratio applied during the cleanup stage. Leave at `0` to only denoise existing detail. |
 | `cleanup_denoise` | FLOAT `0.0 → 1.0` | `0.4` | Denoise strength for the cleanup pass. Ignored when `cleanup_stage` is disabled. |
 
-#### Dilated sampling
+#### How Flow Matching Upscaling Works
 
-Dilated sampling adds a coarse refinement lap immediately after the main sampler completes each stage. The node:
+<p align="left">
+  <img src="images/Flow-Matching-Upscale-Process.jpeg" alt="How Flow Matching Upscaling works">
+</p>
+
+In traditional diffusion models (like SD1.5 or SDXL), generating an image is
+often described as "removing noise" layer by layer. However, **Flow Matching**
+models (like Qwen) work a bit differently: think of them as calculating a
+direct, straight-line path (a "flow") from a chaotic state (noise) to an
+ordered state (your image). When you use Flow Matching Upscaler nodes, you aren't
+just denoising; you are traveling along a specific trajectory. The first stage
+generates your base image effectively by following this path at a lower
+resolution, establishing the composition and major colors quickly and
+efficiently.
+
+The magic happens in the second stage. Instead of just stretching the image and
+adding random noise on top (like a standard "img2img" workflow), the Flow
+Matching nodes physically resize your latents and then mathematically "rewind"
+the clock. As shown in the center of the diagram, we step back along the
+timeline—for example, rewinding from the finished state ($t=0.0$) back to a
+mid-point ($t=0.6$). This places the model back onto the flow trajectory but at
+a much higher resolution. Because the model is resuming an existing journey
+rather than starting a new one, it doesn't hallucinate new objects or change
+your composition; it simply "flows" forward again, filling in the missing
+high-frequency details that naturally belong on that path.
+
+##### A note on "Dilated Sampling"
+
+Dilated sampling adds a coarse refinement lap immediately after the main
+sampler completes each stage. The node:
 
 1. Downscales the freshly denoised latent by `dilated_downscale` using an area kernel, which acts like a low-pass filter.
 2. Runs a short sampler pass in that reduced space with a seed offset so it explores slightly different noise.
 3. Upscales the new latent back to stage resolution and mixes it into the main result with weight `dilated_blend`.
 
-Because high resolutions exaggerate fine-grained hallucinations (e.g., extra pores or glittering fabric), that low-pass/upsample cycle gently suppresses high-frequency artifacts while keeping large shapes intact. Higher downscale factors and blend weights increase the smoothing but also lengthen runtime and can wash out intentional texture, so start with the defaults (`downscale = 2.0`, `blend = 0.25`) and adjust toward `0.15–0.35` when you only need a light cleanup.
+Because high resolutions exaggerate fine-grained hallucinations (e.g., extra
+pores or glittering fabric), that low-pass/upsample cycle gently suppresses
+high-frequency artifacts while keeping large shapes intact. Higher downscale
+factors and blend weights increase the smoothing but also lengthen runtime and
+can wash out intentional texture, so start with the defaults (`downscale =
+2.0`, `blend = 0.25`) and adjust toward `0.15–0.35` when you only need a light
+cleanup.
 
 **Outputs**
 
