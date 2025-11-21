@@ -27,7 +27,7 @@ high-resolution generation.
 
 ## Example Workflow
 
-![Flow Matching Upscaler example workflow](<examples/Method-Comparison.png>)
+[![Flow Matching Upscaler example workflow](examples/Method-Comparison.png)](examples/Method-Comparison.json)
 
 ---
 
