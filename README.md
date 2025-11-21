@@ -80,7 +80,7 @@ The node installs a sampler wrapper and exposes log messages whenever geometry i
 #### How DyPE Works
 
 <p align="left">
-  <img src="images/DyPE-Extrapolation-Process.jpeg" alt="How DyPE works" width="120">
+  <img src="images/DyPE-Extrapolation-Process.jpeg" alt="How DyPE works">
 </p>
 
 Think of the internal "coordinate system" of models like FLUX or Qwen as a
