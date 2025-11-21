@@ -13,6 +13,13 @@ in a flow-consistent manner, denoises with the selected sampler, and blends
 skip residuals to preserve composition. An optional dilated refinement pass
 provides additional global coherence.
 
+Alongside the upscaler, the pack now includes **DyPE for Qwen Image**: a model
+patch node that extends Qwen Image’s spatial rotary embeddings and flow-matching
+noise schedule so the diffusion model stays coherent far beyond its native
+training resolution. Drop it after your model loader to auto-detect geometry,
+apply Dynamic Position Extrapolation (DyPE), and keep edits stable with
+configurable tapering strategies.
+
 ### Memory Use
 
 The progressive upscaler still samples the full latent at once, so extremely
@@ -43,6 +50,32 @@ also upscaling the latents with each step.
    **Flow Matching Progressive Upscaler** under *latent/upscaling*.
 
 ## Node parameters
+
+### DyPE for Qwen Image
+
+**Required inputs**
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `model` | MODEL | – | Qwen Image diffusion model (expects a UNet with `pe_embedder`). |
+| `width` | INT `16 → 16384` | `1024` | Target render width in pixels (match your latent). |
+| `height` | INT `16 → 16384` | `1024` | Target render height in pixels. |
+| `auto_detect` | BOOLEAN | `True` | Try to infer patch size, base resolution, and VAE scale from the model. |
+| `base_width` | INT `16 → 16384` | `1024` | Training width to fall back to when auto detection fails. |
+| `base_height` | INT `16 → 16384` | `1024` | Training height fallback used with manual geometry. |
+| `method` | enum (`yarn`, `ntk`, `base`) | `yarn` | Spatial RoPE extrapolation strategy (YARN recommended for large jumps). |
+| `enable_dype` | BOOLEAN | `True` | Toggle Dynamic Position Extrapolation scaling of the embeddings. |
+| `dype_exponent` | FLOAT `0.0 → 4.0` | `2.0` | Controls how aggressively DyPE ramps across the sampling trajectory. |
+| `base_shift` | FLOAT `0.0 → 10.0` | `1.15` | Baseline shift applied to the flow-matching noise schedule. |
+| `max_shift` | FLOAT `0.0 → 10.0` | `1.35` | Maximum shift reached when running at the target resolution. |
+| `editing_strength` | FLOAT `0.0 → 1.0` | `1.0` | Scales DyPE while editing (lower values preserve originals). |
+| `editing_mode` | enum (`adaptive`, `timestep_aware`, `resolution_aware`, `minimal`, `full`) | `adaptive` | Strategy for tapering DyPE when image conditioning is present. |
+
+**Outputs**
+
+- `model` (`MODEL`): Cloned and patched Qwen Image model with DyPE-enabled positional embeddings.
+
+The node installs a sampler wrapper and exposes log messages whenever geometry is auto-detected or sampler fallbacks trigger. For editing workflows, keep `auto_detect` enabled so the patch reflects the model’s native context length before applying the DyPE scaling.
 
 ### Flow Matching Progressive Upscaler
 

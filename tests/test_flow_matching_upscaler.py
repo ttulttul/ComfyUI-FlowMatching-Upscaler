@@ -1,9 +1,14 @@
+import pathlib
 import sys
 import types
 import unittest
 from unittest import mock
 
 import torch
+
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _install_test_stubs():

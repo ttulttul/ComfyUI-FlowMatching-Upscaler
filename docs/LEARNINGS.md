@@ -43,3 +43,7 @@
   pulling matplotlib into the dependency tree. Adding inline axis ticks and
   channel indices removed the guesswork when correlating bars with latent
   channels.
+- Loading DyPE’s Qwen Image patch locally (outside of ComfyUI’s package loader)
+  required explicit import fallbacks and dynamic module loading so both pytest
+  stubs and the live runtime share a single implementation without relying on
+  the ambient `src` namespace.
