@@ -77,6 +77,33 @@ also upscaling the latents with each step.
 
 The node installs a sampler wrapper and exposes log messages whenever geometry is auto-detected or sampler fallbacks trigger. For editing workflows, keep `auto_detect` enabled so the patch reflects the model’s native context length before applying the DyPE scaling.
 
+#### How DyPE Works
+
+<p align="left">
+  <img src="images/DyPE-Extrapolation-Process.jpeg" alt="How DyPE works" width="120">
+</p>
+
+Think of the internal "coordinate system" of models like FLUX or Qwen as a
+printed map that covers exactly 1024x1024 pixels. When you try to generate a 4K
+image, you are effectively asking the model to drive off the edge of that map.
+Without help, the model gets confused and starts hallucinating—often simply
+repeating the same subject or texture over and over (the "cloning" effect)
+because it ran out of unique coordinate numbers to assign to the new space.
+This is where RoPE (Rotary Positional Embeddings) usually comes in; standard
+tricks basically stretch that small map to fit the large area, but this often
+distorts the image, making it look washed out or structureless.
+
+DyPE solves this by treating the generation process as a journey rather than a
+static snapshot. It takes advantage of how diffusion works: early steps
+determine the broad shapes, while later steps fill in the fine details. Instead
+of stretching the coordinate map permanently, DyPE dynamically adjusts it
+during the sampling steps. It keeps the coordinates close to the model’s native
+training size at the beginning (ensuring your composition stays solid) and
+slowly expands the grid as the KSampler progresses. This allows the model to
+"see" the massive 4K canvas clearly right when it needs to paint the
+high-frequency details, giving you a coherent high-res image without the
+repeating artifacts or the blurry look of standard upscaling.
+
 ### Flow Matching Progressive Upscaler
 
 **Required inputs**
