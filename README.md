@@ -275,6 +275,70 @@ same streaming fallback as the progressive node: LOW_VRAM mode is temporarily
 enabled and attention kernels see a capped free-memory budget so they chunk the
 computation while preserving global conditioning.
 
+## More about DyPE
+
+The `method` parameter determine how the model handles "coordinates" that fall outside
+its native training resolution (e.g., when asking a 1024px model to generate a
+4096px image).
+
+### 1. YaRN (Yet another RoPE extension)
+**The Recommended Default**
+
+YaRN is the most sophisticated method and the core foundation of the DyPE
+technique. Unlike simple stretching, YaRN divides the model's internal
+frequencies into different bands. It "stretches" the low-frequency signals
+(which define big shapes and global structure) to fit the larger canvas, but it
+leaves high-frequency signals (which define fine texture and noise) largely
+alone.
+
+*   **How it works in DyPE:** When `enable_dype` is active, the node implements
+    "DY-YaRN." It dynamically ramps the interpolation parameters over time.
+    Early in the generation, it aggressively adjusts the coordinates to secure
+    the global composition. As the image clarifies, it eases off, allowing the
+    model to render crisp, high-frequency details without blurring.
+*   **Best for:** Ultra-high resolutions (4K+), maintaining sharp textures, and
+    preventing the "mushy" look often associated with model stretching.
+
+### 2. NTK (Neural Tangent Kernel)
+**The "Smoother" Alternative**
+
+NTK Scaling is a broader, more uniform approach to coordinate stretching.
+Instead of treating low and high frequencies differently like YaRN, NTK
+effectively changes the "rotation speed" of the positional embeddings across
+the board. It tells the model to pretend that spatial changes happen more
+slowly, allowing the 1024px "map" to cover a 4096px area.
+
+*   **How it works in DyPE:** The node applies a scalar multiplier to the
+    rotation frequencies (`theta`). When `enable_dype` is on, this multiplier
+    scales up and down based on the timestep.
+*   **Best for:** Situations where YaRN looks "over-sharpened" or introduces
+    gridded artifacts. It is also the default recommendation for the **Qwen
+    CLIP** (text encoder) node, as language models tend to respond better to
+    the uniform scaling of NTK than the complex banding of YaRN.
+
+### 3. Base
+**The Control Group / Vanilla Behavior**
+
+This setting effectively turns off the spatial extrapolation mathematics. It
+forces the model to use its original, unmodified positional embeddings.
+
+*   **How it works:** If you generate at 1024x1024, this is identical to the
+    original model. If you generate at 4K, the model will run out of unique
+    coordinates. This usually results in the model repeating the same image
+    patches over and over (tiling artifacts) or completely losing coherence.
+*   **Best for:** Comparisons (to see "before and after"), or generating at the
+    model's native resolution. In the Qwen Image node, you might use this if
+    you only want to use the **Noise Schedule Shift** features of DyPE without
+    altering the spatial embeddings.
+
+### Summary Table
+
+| Method | Fidelity | Sharpness | Recommended Use Case |
+| :--- | :--- | :--- | :--- |
+| **YaRN** | High | High | **Default for Images.** Best for 2K/4K generation and preserving texture. |
+| **NTK** | Medium | Medium | Use for images if YaRN creates jagged artifacts. |
+| **Base** | Native | N/A | Testing, native resolution, or when only using noise-schedule shifts. |
+
 ## Development
 
 ### Running tests
