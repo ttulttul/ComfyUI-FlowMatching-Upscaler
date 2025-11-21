@@ -168,7 +168,38 @@ rather than starting a new one, it doesn't hallucinate new objects or change
 your composition; it simply "flows" forward again, filling in the missing
 high-frequency details that naturally belong on that path.
 
-##### A note on "Dilated Sampling"
+#### A note on the `noise` parameter
+
+In the context of Flow Matching (like FLUX) and the **Flow Matching Stage** nodes, the noise parameter plays a crucial, slightly counter-intuitive role. It is not just about "randomness"; it is about **mathematical validity** and **providing fuel for detail**.
+
+Here is what adding that noise actually does:
+
+##### 1. It Validates the "Time" State
+In a Flow Matching model, every point on the timeline corresponds to a specific mix of **Signal (Image)** and **Noise**.
+*   **t=0.0:** 100% Image, 0% Noise.
+*   **t=1.0:** 0% Image, 100% Noise.
+*   **t=0.6:** ~40% Image, ~60% Noise.
+
+When you upscale an image (Stage 2), you take a clean, finished result and
+stretch it. It is now a **100% Image** (just blurry). If you try to insert this
+clean image back into the flow at **t=0.6**, the model gets confused. It
+expects a noisy, grainy mess, but you handed it a clean, smooth image.  **The
+noise parameter adds the necessary static back into the image so that it
+matches the statistical expectations of that timestep.**
+
+##### 2. It Acts as "Texture Fuel"
+This is the most practical effect for ComfyUI users. When you perform a bicubic upscale, you lose high-frequency data (fine textures like skin pores, fabric weave, or distant leaves). The image becomes "smooth."
+
+The model cannot invent detail out of nothing; it needs a chaotic substrate to
+"carve" details into.
+*   **Without Noise:** The model sees smooth pixels and tries to keep them
+    smooth. The result often looks **waxy, plastic, or painted**.
+*   **With "A Bit" of Noise:** You provide a layer of grain. The model looks at that grain and says, "Ah, at this location, this grain looks like it should be a pore," or "This grain should be a thread." It converts the random noise into structured detail.
+
+##### 3. It Prevents "Burn-in" Artifacts
+If you don't add enough noise, the model tends to over-adhere to the low-resolution artifacts. The blocky or blurry edges from the upscale get "baked in" because the model treats them as intentional features. Adding noise dithers these upscaling artifacts, allowing the model to hallucinate a cleaner, sharper edge in their place.
+
+#### A note on "Dilated Sampling"
 
 Dilated sampling adds a coarse refinement lap immediately after the main
 sampler completes each stage. The node:
@@ -277,11 +308,13 @@ computation while preserving global conditioning.
 
 ## More about DyPE
 
+### The `method` parameter
+
 The `method` parameter determine how the model handles "coordinates" that fall outside
 its native training resolution (e.g., when asking a 1024px model to generate a
 4096px image).
 
-### 1. YaRN (Yet another RoPE extension)
+#### 1. YaRN (Yet another RoPE extension)
 **The Recommended Default**
 
 YaRN is the most sophisticated method and the core foundation of the DyPE
@@ -299,7 +332,7 @@ alone.
 *   **Best for:** Ultra-high resolutions (4K+), maintaining sharp textures, and
     preventing the "mushy" look often associated with model stretching.
 
-### 2. NTK (Neural Tangent Kernel)
+#### 2. NTK (Neural Tangent Kernel)
 **The "Smoother" Alternative**
 
 NTK Scaling is a broader, more uniform approach to coordinate stretching.
@@ -316,7 +349,7 @@ slowly, allowing the 1024px "map" to cover a 4096px area.
     CLIP** (text encoder) node, as language models tend to respond better to
     the uniform scaling of NTK than the complex banding of YaRN.
 
-### 3. Base
+#### 3. Base
 **The Control Group / Vanilla Behavior**
 
 This setting effectively turns off the spatial extrapolation mathematics. It
@@ -331,7 +364,7 @@ forces the model to use its original, unmodified positional embeddings.
     you only want to use the **Noise Schedule Shift** features of DyPE without
     altering the spatial embeddings.
 
-### Summary Table
+#### Summary Table
 
 | Method | Fidelity | Sharpness | Recommended Use Case |
 | :--- | :--- | :--- | :--- |
