@@ -1,5 +1,5 @@
-<p align="center">
-  <img src="images/Icon.png" alt="ComfyUI Flow Matching Upscaler Icon" width="120">
+<p align="left">
+  <img src="images/System-Diagram.jpeg" alt="ComfyUI Flow Matching Upscaler System Diagram">
 </p>
 
 # ComfyUI Flow Matching Upscaler
