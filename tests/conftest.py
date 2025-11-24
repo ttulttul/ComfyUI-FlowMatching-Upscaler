@@ -18,6 +18,8 @@ def _ensure_comfy_stubs():
     comfy_module = types.ModuleType("comfy")
 
     model_management_module = types.ModuleType("comfy.model_management")
+    sampling_module = types.ModuleType("comfy.model_sampling")
+    model_patcher_module = types.ModuleType("comfy.model_patcher")
 
     class _VRAMState:
         NORMAL = "normal"
@@ -115,14 +117,36 @@ def _ensure_comfy_stubs():
 
     samplers_module.KSampler = _DummyKSampler
 
+    class _ModelSamplingFlux:
+        pass
+
+    def _flux_time_shift(*_args, **_kwargs):
+        return 0.0
+
+    sampling_module.ModelSamplingFlux = _ModelSamplingFlux
+    sampling_module.flux_time_shift = _flux_time_shift
+
+    class _ModelPatcherStub:
+        def __init__(self):
+            self.model = types.SimpleNamespace()
+
+        def clone(self):
+            return self
+
+    model_patcher_module.ModelPatcher = _ModelPatcherStub
+
     comfy_module.model_management = model_management_module
     comfy_module.utils = utils_module
     comfy_module.samplers = samplers_module
+    comfy_module.model_sampling = sampling_module
+    comfy_module.model_patcher = model_patcher_module
 
     sys.modules["comfy"] = comfy_module
     sys.modules["comfy.model_management"] = model_management_module
     sys.modules["comfy.utils"] = utils_module
     sys.modules["comfy.samplers"] = samplers_module
+    sys.modules["comfy.model_sampling"] = sampling_module
+    sys.modules["comfy.model_patcher"] = model_patcher_module
 
 
 _ensure_comfy_stubs()

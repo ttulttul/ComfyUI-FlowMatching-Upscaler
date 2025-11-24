@@ -17,12 +17,32 @@ def _install_test_stubs():
         comfy_module = types.ModuleType("comfy")
         samplers_module = types.ModuleType("comfy.samplers")
         utils_module = types.ModuleType("comfy.utils")
+        sampling_module = types.ModuleType("comfy.model_sampling")
+        model_patcher_module = types.ModuleType("comfy.model_patcher")
 
         class _SamplerStub:
             SAMPLERS = ("test_sampler",)
             SCHEDULERS = ("test_scheduler",)
 
         samplers_module.KSampler = _SamplerStub
+
+        class _ModelSamplingFlux:
+            pass
+
+        def _flux_time_shift(*_args, **_kwargs):
+            return 0.0
+
+        sampling_module.ModelSamplingFlux = _ModelSamplingFlux
+        sampling_module.flux_time_shift = _flux_time_shift
+
+        class _ModelPatcherStub:
+            def __init__(self):
+                self.model = types.SimpleNamespace()
+
+            def clone(self):
+                return self
+
+        model_patcher_module.ModelPatcher = _ModelPatcherStub
 
         call_log = []
 
@@ -68,10 +88,14 @@ def _install_test_stubs():
 
         comfy_module.samplers = samplers_module
         comfy_module.utils = utils_module
+        comfy_module.model_sampling = sampling_module
+        comfy_module.model_patcher = model_patcher_module
 
         sys.modules["comfy"] = comfy_module
         sys.modules["comfy.samplers"] = samplers_module
         sys.modules["comfy.utils"] = utils_module
+        sys.modules["comfy.model_sampling"] = sampling_module
+        sys.modules["comfy.model_patcher"] = model_patcher_module
 
     if "nodes" not in sys.modules:
         nodes_module = types.ModuleType("nodes")
@@ -138,6 +162,49 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertIs(out_model, model_obj)
         self.assertEqual(out_positive, [])
         self.assertEqual(out_negative, [])
+
+    def test_progressive_upscale_rescales_noise_mask(self):
+        latent = {
+            "samples": torch.ones((1, 4, 8, 8), dtype=torch.float32),
+            "noise_mask": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        }
+        mask_shapes = []
+
+        def fake_common_ksampler(**kwargs):
+            latent_payload = kwargs["latent"]
+            self.assertIn("noise_mask", latent_payload)
+            mask_shapes.append(tuple(latent_payload["noise_mask"].shape[-2:]))
+            result = latent_payload.copy()
+            result["samples"] = torch.zeros_like(latent_payload["samples"])
+            return (result,)
+
+        with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
+            with mock.patch.object(fm_upscaler, "apply_flow_renoise", side_effect=lambda tensor, *_: tensor):
+                output_latent, *_ = self.node.progressive_upscale(
+                    model=object(),
+                    positive=[],
+                    negative=[],
+                    latent=latent,
+                    seed=0,
+                    steps_per_stage=1,
+                    cfg=1.0,
+                    sampler_name=self.default_sampler,
+                    scheduler=self.default_scheduler,
+                    total_scale=4.0,
+                    stages=2,
+                    renoise_start=0.0,
+                    renoise_end=0.0,
+                    skip_blend_start=0.0,
+                    skip_blend_end=0.0,
+                    upscale_method="nearest-exact",
+                    noise_schedule_override="0.0,0.0",
+                    skip_schedule_override="0.0,0.0",
+                    enable_dilated_sampling="disable",
+                )
+
+        self.assertEqual(mask_shapes, [(16, 16), (32, 32)])
+        self.assertIn("noise_mask", output_latent)
+        self.assertEqual(tuple(output_latent["noise_mask"].shape[-2:]), (32, 32))
 
     def test_skip_blend_override_controls_result(self):
         def fake_common_ksampler(**kwargs):
@@ -362,10 +429,16 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
 
     def test_stage_node_rescales_latent(self):
         stage_node = fm_upscaler.FlowMatchingStage()
-        latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}
+        latent = {
+            "samples": torch.ones((1, 4, 8, 8), dtype=torch.float32),
+            "noise_mask": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        }
+        recorded_mask_shapes = []
 
         def fake_common_ksampler(**kwargs):
             template = kwargs["latent"]
+            self.assertIn("noise_mask", template)
+            recorded_mask_shapes.append(tuple(template["noise_mask"].shape[-2:]))
             result = template.copy()
             result["samples"] = torch.full_like(template["samples"], 2.0)
             return (result,)
@@ -392,6 +465,11 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
                 )
 
         self.assertEqual(tuple(output_latent["samples"].shape[-2:]), (16, 16))
+        self.assertIn("noise_mask", output_latent)
+        self.assertEqual(tuple(output_latent["noise_mask"].shape[-2:]), (16, 16))
+        self.assertEqual(recorded_mask_shapes, [(16, 16)])
+        self.assertIn("noise_mask", presampler_latent)
+        self.assertEqual(tuple(presampler_latent["noise_mask"].shape[-2:]), (16, 16))
         expected_value = 0.25 * 1.0 + 0.75 * 2.0
         self.assertTrue(torch.allclose(output_latent["samples"], torch.full_like(output_latent["samples"], expected_value)))
         mask64 = 0xFFFFFFFFFFFFFFFF

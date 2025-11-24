@@ -77,6 +77,7 @@ Dilated sampling adds a coarse refinement lap immediately after the main sampler
 
 *   **Upscaling is Optional:** You don't have to upscale! Set `total_scale` to 1.0 to use this node for "Refinement." It gives the model a second chance to generate details on an existing latent without changing the resolution.
 *   **Memory Use:** The upscaler samples the full latent. If VRAM is exhausted, the node automatically switches to a streaming fallback (LOW_VRAM mode), throttling the attention kernels. It will be slower, but it will not crash.
+*   **Mask-aware Upscaling:** When the input latent ships with a `noise_mask`, the nodes upscale the mask alongside the latent so inpaint workflows keep their boundaries aligned at every stage.
 
 ### Node Parameters: Progressive Upscaler
 

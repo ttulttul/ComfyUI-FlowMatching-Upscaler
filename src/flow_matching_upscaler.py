@@ -368,6 +368,47 @@ def progressive_upscale_latent(
     return upscaled
 
 
+def _resize_noise_mask(
+    latent_dict: dict,
+    *,
+    scale_factor: float,
+    method: str,
+    context: str,
+) -> Optional[torch.Tensor]:
+    """
+    Ensure the latent dictionary's noise mask matches the scaled latent resolution.
+    """
+    if "noise_mask" not in latent_dict:
+        return None
+
+    mask = latent_dict["noise_mask"]
+    if not isinstance(mask, torch.Tensor):
+        logger.debug("%s: noise mask present but not a tensor; skipping resize.", context)
+        return None
+
+    original_shape = tuple(mask.shape)
+    upscaled_mask = progressive_upscale_latent(mask, scale_factor, method=method)
+    latent_dict["noise_mask"] = upscaled_mask
+
+    resized_shape = tuple(upscaled_mask.shape)
+    if resized_shape != original_shape:
+        logger.debug(
+            "%s: resized noise mask from %s to %s using %s scaling.",
+            context,
+            original_shape,
+            resized_shape,
+            method,
+        )
+    else:
+        logger.debug(
+            "%s: noise mask already at target resolution %s (scale %.3f).",
+            context,
+            resized_shape,
+            scale_factor,
+        )
+    return upscaled_mask
+
+
 def apply_flow_renoise(
     latent: torch.Tensor,
     noise_level: float,
@@ -1201,6 +1242,13 @@ class FlowMatchingProgressiveUpscaler:
                 method=upscale_method,
             )
 
+            _resize_noise_mask(
+                current_latent_dict,
+                scale_factor=stage.scale_factor,
+                method=upscale_method,
+                context=f"{stage_label} mask",
+            )
+
             skip_reference = upscaled
             _log_channel_stats(f"{stage_label} skip_reference", skip_reference)
             re_noised = apply_flow_renoise(
@@ -1209,6 +1257,9 @@ class FlowMatchingProgressiveUpscaler:
                 stage.seed,
             )
             _log_channel_stats(f"{stage_label} renoised", re_noised)
+
+            # We don't need the upscaled tensor anymore; free up the VRAM
+            del upscaled
 
             latent_payload = current_latent_dict.copy()
             latent_payload["samples"] = re_noised
@@ -1469,6 +1520,13 @@ class FlowMatchingStage:
             method=upscale_method,
         )
 
+        _resize_noise_mask(
+            current_latent_dict,
+            scale_factor=scale_factor,
+            method=upscale_method,
+            context="FlowMatchingStage/mask",
+        )
+
         if reduce_memory_flag:
             skip_reference = upscaled
         else:
@@ -1479,6 +1537,9 @@ class FlowMatchingStage:
             noise_ratio,
             seed,
         )
+
+        # We don't need this tensor anymore; free the VRAM before we sample
+        del upscaled
 
         latent_payload = current_latent_dict.copy()
         latent_payload["samples"] = re_noised
@@ -1557,6 +1618,10 @@ class FlowMatchingStage:
                 description="stage dilated refinement" + (" (streaming fallback)" if streaming_enabled else ""),
             )
             blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
+
+            # Delete the sampler output dict if no longer needed before the next
+            # assignment to help garbage collection.
+            del refined_dict
 
         out = current_latent_dict.copy()
         out["samples"] = blended

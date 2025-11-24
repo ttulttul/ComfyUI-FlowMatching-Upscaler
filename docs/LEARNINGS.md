@@ -47,3 +47,7 @@
   required explicit import fallbacks and dynamic module loading so both pytest
   stubs and the live runtime share a single implementation without relying on
   the ambient `src` namespace.
+- Progressive stages must resize any accompanying `noise_mask` in lockstep with
+  the latent—otherwise sampler inputs drift after the first upscale. Keeping
+  the mask synchronized per stage (and covering it with targeted tests) guards
+  inpaint workflows against subtle misalignment bugs.
