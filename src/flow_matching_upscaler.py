@@ -346,6 +346,9 @@ def _laplacian_pyramid_blend(
             # Downsample by 2x using area averaging
             h, w = current.shape[-2], current.shape[-1]
             new_h, new_w = max(1, h // 2), max(1, w // 2)
+            # Stop if we can't actually downsample (area mode requires output < input)
+            if new_h >= h and new_w >= w:
+                break
             current = torch.nn.functional.interpolate(
                 current, size=(new_h, new_w), mode='area'
             )
@@ -355,7 +358,9 @@ def _laplacian_pyramid_blend(
     def _build_laplacian_pyramid(img: torch.Tensor, num_levels: int) -> List[torch.Tensor]:
         gaussian = _build_gaussian_pyramid(img, num_levels)
         laplacian = []
-        for i in range(num_levels - 1):
+        # Use actual pyramid length, which may be shorter than requested
+        actual_levels = len(gaussian)
+        for i in range(actual_levels - 1):
             h, w = gaussian[i].shape[-2], gaussian[i].shape[-1]
             upsampled = torch.nn.functional.interpolate(
                 gaussian[i + 1], size=(h, w), mode='bilinear', align_corners=False
@@ -368,19 +373,22 @@ def _laplacian_pyramid_blend(
     pyr_orig = _build_laplacian_pyramid(original, levels)
     pyr_dilated = _build_laplacian_pyramid(dilated, levels)
 
+    # Use actual pyramid length (may be shorter than requested if image too small)
+    actual_levels = len(pyr_orig)
+
     # Blend weights: more dilated influence at coarse levels (end of list)
     # Less at fine levels (start of list)
     pyr_blended = []
-    for i in range(levels):
+    for i in range(actual_levels):
         # Level 0 is finest (high freq), level n-1 is coarsest (low freq)
         # Dilated should contribute more to low frequencies
-        level_blend = blend * (0.2 + 0.8 * (i / max(levels - 1, 1)))
+        level_blend = blend * (0.2 + 0.8 * (i / max(actual_levels - 1, 1)))
         blended_level = torch.lerp(pyr_orig[i], pyr_dilated[i], level_blend)
         pyr_blended.append(blended_level)
 
     # Reconstruct from blended pyramid
     result = pyr_blended[-1]
-    for i in range(levels - 2, -1, -1):
+    for i in range(actual_levels - 2, -1, -1):
         h, w = pyr_blended[i].shape[-2], pyr_blended[i].shape[-1]
         result = torch.nn.functional.interpolate(
             result, size=(h, w), mode='bilinear', align_corners=False
@@ -415,6 +423,20 @@ def _gaussian_weighted_blend(
     # Apply Gaussian blur to smooth grid artifacts
     kernel_size = int(blur_sigma * 4) | 1  # Ensure odd
     kernel_size = max(3, min(kernel_size, 31))  # Clamp to reasonable range
+
+    # Check if tensor is large enough for meaningful blur (reflect padding needs pad < dim)
+    h, w = diff.shape[-2], diff.shape[-1]
+    min_dim = min(h, w)
+    if min_dim < 3:
+        # Tensor too small for gaussian blur, fall back to linear blend
+        return torch.lerp(original, dilated, blend)
+
+    # Reduce kernel size if tensor is too small (need pad < dim for reflect mode)
+    max_kernel = min(2 * min_dim - 1, kernel_size)
+    max_kernel = max_kernel | 1  # Ensure odd
+    if max_kernel < 3:
+        return torch.lerp(original, dilated, blend)
+    kernel_size = max_kernel
 
     # Build Gaussian kernel
     device = diff.device
