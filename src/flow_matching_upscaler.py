@@ -330,6 +330,11 @@ def _laplacian_pyramid_blend(
     if blend >= 1.0:
         return dilated
 
+    # Fall back to linear blend for 3D+ spatial dimensions (video latents)
+    # Pyramid operations only support 2D spatial (batch, channels, height, width)
+    if original.dim() > 4:
+        return torch.lerp(original, dilated, blend)
+
     # Ensure minimum spatial dimensions for pyramid levels
     min_dim = min(original.shape[-2], original.shape[-1])
     max_levels = max(1, int(math.log2(min_dim)) - 2)
@@ -416,6 +421,11 @@ def _gaussian_weighted_blend(
         return original
     if blend >= 1.0:
         return dilated
+
+    # Fall back to linear blend for 3D+ spatial dimensions (video latents)
+    # 2D convolution only supports 4D tensors (batch, channels, height, width)
+    if original.dim() > 4:
+        return torch.lerp(original, dilated, blend)
 
     # Compute difference
     diff = dilated - original
