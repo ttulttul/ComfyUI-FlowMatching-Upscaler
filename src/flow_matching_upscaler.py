@@ -330,9 +330,15 @@ def _laplacian_pyramid_blend(
     if blend >= 1.0:
         return dilated
 
-    # Fall back to linear blend for 3D+ spatial dimensions (video latents)
-    # Pyramid operations only support 2D spatial (batch, channels, height, width)
-    if original.dim() > 4:
+    # Handle 5D video latents with single temporal frame by squeezing to 4D
+    # Shape: (batch, channels, 1, height, width) -> (batch, channels, height, width)
+    squeezed_temporal = False
+    if original.dim() == 5 and original.shape[2] == 1:
+        original = original.squeeze(2)
+        dilated = dilated.squeeze(2)
+        squeezed_temporal = True
+    elif original.dim() > 4:
+        # Fall back to linear blend for multi-frame video latents
         return torch.lerp(original, dilated, blend)
 
     # Ensure minimum spatial dimensions for pyramid levels
@@ -342,7 +348,10 @@ def _laplacian_pyramid_blend(
 
     if levels < 2:
         # Fall back to linear blend if image too small
-        return torch.lerp(original, dilated, blend)
+        result = torch.lerp(original, dilated, blend)
+        if squeezed_temporal:
+            result = result.unsqueeze(2)
+        return result
 
     def _build_gaussian_pyramid(img: torch.Tensor, num_levels: int) -> List[torch.Tensor]:
         pyramid = [img]
@@ -403,6 +412,10 @@ def _laplacian_pyramid_blend(
     # Free pyramid tensors
     del pyr_orig, pyr_dilated, pyr_blended
 
+    # Restore temporal dimension if it was squeezed
+    if squeezed_temporal:
+        result = result.unsqueeze(2)
+
     return result
 
 
@@ -422,9 +435,15 @@ def _gaussian_weighted_blend(
     if blend >= 1.0:
         return dilated
 
-    # Fall back to linear blend for 3D+ spatial dimensions (video latents)
-    # 2D convolution only supports 4D tensors (batch, channels, height, width)
-    if original.dim() > 4:
+    # Handle 5D video latents with single temporal frame by squeezing to 4D
+    # Shape: (batch, channels, 1, height, width) -> (batch, channels, height, width)
+    squeezed_temporal = False
+    if original.dim() == 5 and original.shape[2] == 1:
+        original = original.squeeze(2)
+        dilated = dilated.squeeze(2)
+        squeezed_temporal = True
+    elif original.dim() > 4:
+        # Fall back to linear blend for multi-frame video latents
         return torch.lerp(original, dilated, blend)
 
     # Compute difference
@@ -439,13 +458,19 @@ def _gaussian_weighted_blend(
     min_dim = min(h, w)
     if min_dim < 3:
         # Tensor too small for gaussian blur, fall back to linear blend
-        return torch.lerp(original, dilated, blend)
+        result = torch.lerp(original, dilated, blend)
+        if squeezed_temporal:
+            result = result.unsqueeze(2)
+        return result
 
     # Reduce kernel size if tensor is too small (need pad < dim for reflect mode)
     max_kernel = min(2 * min_dim - 1, kernel_size)
     max_kernel = max_kernel | 1  # Ensure odd
     if max_kernel < 3:
-        return torch.lerp(original, dilated, blend)
+        result = torch.lerp(original, dilated, blend)
+        if squeezed_temporal:
+            result = result.unsqueeze(2)
+        return result
     kernel_size = max_kernel
 
     # Build Gaussian kernel
@@ -478,6 +503,10 @@ def _gaussian_weighted_blend(
 
     # Free intermediate tensors
     del diff, blurred
+
+    # Restore temporal dimension if it was squeezed
+    if squeezed_temporal:
+        result = result.unsqueeze(2)
 
     return result
 
