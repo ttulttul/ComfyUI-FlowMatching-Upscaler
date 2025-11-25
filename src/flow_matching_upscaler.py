@@ -954,9 +954,20 @@ def dilated_refinement(
     blend: float,
     min_steps: int = 1,
     use_same_seed: bool = False,
+    dilated_denoise: float = 0.5,
 ) -> torch.Tensor:
     """
-    Run a coarse-grained refinement by downscaling, sampling, then upscaling back.
+    Run a coarse-grained refinement by downscaling, re-noising, sampling, then upscaling back.
+
+    This approach preserves spatial structure by:
+    1. Downscaling the latent to a lower resolution
+    2. Re-noising the downscaled latent to the appropriate noise level (50% by default)
+    3. Denoising for half the timesteps (denoise=0.5 by default)
+    4. Upscaling and blending the result back with the original
+
+    By starting from the downscaled version of the actual latent (with partial noise added)
+    rather than generating from scratch, the low-resolution sample maintains the spatial
+    structure of the high-resolution sample better.
 
     Uses frequency-domain blending to combine low frequencies from the dilated result
     with high frequencies from the original, avoiding grid artifacts.
@@ -967,6 +978,9 @@ def dilated_refinement(
             consider setting this higher (e.g., 4) to ensure adequate sampling.
         use_same_seed: If True, use the same seed as the main sampling pass. If False
             (default), derive a new seed by adding 10_000 to the base seed.
+        dilated_denoise: Denoising strength for the dilated sampling pass. Default is 0.5
+            to only run half the timesteps, which works with the re-noising to preserve
+            spatial structure from the original latent.
     """
     blend = max(0.0, min(1.0, blend))
     if blend == 0.0:
@@ -993,9 +1007,6 @@ def dilated_refinement(
             crop="disabled",
         )
 
-    latent_copy = base_latent.copy()
-    latent_copy["samples"] = downsampled
-
     logger.debug(
         "Running dilated refinement at %sx%s (factor %.2f).",
         down_width,
@@ -1004,10 +1015,21 @@ def dilated_refinement(
     )
     _log_channel_stats("dilated_refinement/downsampled", downsampled)
 
+    # Re-noise the downscaled latent to the appropriate noise level for partial denoising.
+    # Using the same noise level as dilated_denoise ensures consistency with the sampling.
+    dilated_seed = seed if use_same_seed else seed + 10_000
+    renoised = apply_flow_renoise(downsampled, dilated_denoise, dilated_seed)
+    _log_channel_stats("dilated_refinement/renoised", renoised)
+
+    # Free the downsampled tensor now that we have renoised
+    del downsampled
+
+    latent_copy = base_latent.copy()
+    latent_copy["samples"] = renoised
+
     sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_copy)
 
     dilated_steps = max(min_steps, steps // 2)
-    dilated_seed = seed if use_same_seed else seed + 10_000
 
     refined_down = run_sampler(
         model=model,
@@ -1019,7 +1041,7 @@ def dilated_refinement(
         cfg=cfg,
         steps=dilated_steps,
         seed=dilated_seed,
-        denoise=denoise,
+        denoise=dilated_denoise,
     )
 
     restored_samples = restore_fn(refined_down["samples"])
