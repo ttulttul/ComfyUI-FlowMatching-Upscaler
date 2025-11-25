@@ -244,8 +244,6 @@ def _draw_text(canvas: np.ndarray, text: str, x: int, y: int, color: np.ndarray)
         cursor += glyph_width + 1
 
 
-# Dilated blending method constants
-_DILATED_BLEND_METHODS: Tuple[str, ...] = ("linear", "frequency", "laplacian", "gaussian")
 
 
 def _frequency_blend(
@@ -330,238 +328,30 @@ def _frequency_blend(
     return result
 
 
-def _laplacian_pyramid_blend(
-    original: torch.Tensor,
-    dilated: torch.Tensor,
-    blend: float,
-    levels: int = 4,
-) -> torch.Tensor:
-    """
-    Blend using Laplacian pyramids for seamless multi-scale compositing.
-
-    Coarse levels get more dilated influence, fine levels get less.
-    This naturally avoids grid artifacts by handling each scale separately.
-    """
-    if blend <= 0.0:
-        return original
-    if blend >= 1.0:
-        return dilated
-
-    # Handle 5D video latents with single temporal frame by squeezing to 4D
-    # Shape: (batch, channels, 1, height, width) -> (batch, channels, height, width)
-    squeezed_temporal = False
-    if original.dim() == 5 and original.shape[2] == 1:
-        original = original.squeeze(2)
-        dilated = dilated.squeeze(2)
-        squeezed_temporal = True
-    elif original.dim() > 4:
-        # Fall back to linear blend for multi-frame video latents
-        return torch.lerp(original, dilated, blend)
-
-    # Ensure minimum spatial dimensions for pyramid levels
-    min_dim = min(original.shape[-2], original.shape[-1])
-    max_levels = max(1, int(math.log2(min_dim)) - 2)
-    levels = min(levels, max_levels)
-
-    if levels < 2:
-        # Fall back to linear blend if image too small
-        result = torch.lerp(original, dilated, blend)
-        if squeezed_temporal:
-            result = result.unsqueeze(2)
-        return result
-
-    def _build_gaussian_pyramid(img: torch.Tensor, num_levels: int) -> List[torch.Tensor]:
-        pyramid = [img]
-        current = img
-        for _ in range(num_levels - 1):
-            # Downsample by 2x using area averaging
-            h, w = current.shape[-2], current.shape[-1]
-            new_h, new_w = max(1, h // 2), max(1, w // 2)
-            # Stop if we can't actually downsample (area mode requires output < input)
-            if new_h >= h and new_w >= w:
-                break
-            current = torch.nn.functional.interpolate(
-                current, size=(new_h, new_w), mode='area'
-            )
-            pyramid.append(current)
-        return pyramid
-
-    def _build_laplacian_pyramid(img: torch.Tensor, num_levels: int) -> List[torch.Tensor]:
-        gaussian = _build_gaussian_pyramid(img, num_levels)
-        laplacian = []
-        # Use actual pyramid length, which may be shorter than requested
-        actual_levels = len(gaussian)
-        for i in range(actual_levels - 1):
-            h, w = gaussian[i].shape[-2], gaussian[i].shape[-1]
-            upsampled = torch.nn.functional.interpolate(
-                gaussian[i + 1], size=(h, w), mode='bilinear', align_corners=False
-            )
-            laplacian.append(gaussian[i] - upsampled)
-        laplacian.append(gaussian[-1])  # Residual (lowest frequency)
-        return laplacian
-
-    # Build pyramids
-    pyr_orig = _build_laplacian_pyramid(original, levels)
-    pyr_dilated = _build_laplacian_pyramid(dilated, levels)
-
-    # Use actual pyramid length (may be shorter than requested if image too small)
-    actual_levels = len(pyr_orig)
-
-    # Blend weights: more dilated influence at coarse levels (end of list)
-    # Less at fine levels (start of list)
-    pyr_blended = []
-    for i in range(actual_levels):
-        # Level 0 is finest (high freq), level n-1 is coarsest (low freq)
-        # Dilated should contribute more to low frequencies
-        level_blend = blend * (0.2 + 0.8 * (i / max(actual_levels - 1, 1)))
-        blended_level = torch.lerp(pyr_orig[i], pyr_dilated[i], level_blend)
-        pyr_blended.append(blended_level)
-
-    # Reconstruct from blended pyramid
-    result = pyr_blended[-1]
-    for i in range(actual_levels - 2, -1, -1):
-        h, w = pyr_blended[i].shape[-2], pyr_blended[i].shape[-1]
-        result = torch.nn.functional.interpolate(
-            result, size=(h, w), mode='bilinear', align_corners=False
-        )
-        result = result + pyr_blended[i]
-
-    # Free pyramid tensors
-    del pyr_orig, pyr_dilated, pyr_blended
-
-    # Restore temporal dimension if it was squeezed
-    if squeezed_temporal:
-        result = result.unsqueeze(2)
-
-    return result
-
-
-def _gaussian_weighted_blend(
-    original: torch.Tensor,
-    dilated: torch.Tensor,
-    blend: float,
-    blur_sigma: float = 2.0,
-) -> torch.Tensor:
-    """
-    Blend by applying Gaussian blur to the difference before adding.
-
-    This smooths out any grid artifacts from the upscaling step.
-    """
-    if blend <= 0.0:
-        return original
-    if blend >= 1.0:
-        return dilated
-
-    # Handle 5D video latents with single temporal frame by squeezing to 4D
-    # Shape: (batch, channels, 1, height, width) -> (batch, channels, height, width)
-    squeezed_temporal = False
-    if original.dim() == 5 and original.shape[2] == 1:
-        original = original.squeeze(2)
-        dilated = dilated.squeeze(2)
-        squeezed_temporal = True
-    elif original.dim() > 4:
-        # Fall back to linear blend for multi-frame video latents
-        return torch.lerp(original, dilated, blend)
-
-    # Compute difference
-    diff = dilated - original
-
-    # Apply Gaussian blur to smooth grid artifacts
-    kernel_size = int(blur_sigma * 4) | 1  # Ensure odd
-    kernel_size = max(3, min(kernel_size, 31))  # Clamp to reasonable range
-
-    # Check if tensor is large enough for meaningful blur (reflect padding needs pad < dim)
-    h, w = diff.shape[-2], diff.shape[-1]
-    min_dim = min(h, w)
-    if min_dim < 3:
-        # Tensor too small for gaussian blur, fall back to linear blend
-        result = torch.lerp(original, dilated, blend)
-        if squeezed_temporal:
-            result = result.unsqueeze(2)
-        return result
-
-    # Reduce kernel size if tensor is too small (need pad < dim for reflect mode)
-    max_kernel = min(2 * min_dim - 1, kernel_size)
-    max_kernel = max_kernel | 1  # Ensure odd
-    if max_kernel < 3:
-        result = torch.lerp(original, dilated, blend)
-        if squeezed_temporal:
-            result = result.unsqueeze(2)
-        return result
-    kernel_size = max_kernel
-
-    # Build Gaussian kernel
-    device = diff.device
-    dtype = diff.dtype
-
-    x = torch.arange(kernel_size, device=device, dtype=torch.float32) - kernel_size // 2
-    gaussian_1d = torch.exp(-0.5 * (x / blur_sigma) ** 2)
-    gaussian_1d = gaussian_1d / gaussian_1d.sum()
-
-    # Separable 2D Gaussian via two 1D convolutions
-    # Reshape for conv2d: (out_channels, in_channels/groups, kH, kW)
-    kernel_h = gaussian_1d.view(1, 1, -1, 1)
-    kernel_w = gaussian_1d.view(1, 1, 1, -1)
-
-    # Apply per-channel (groups=channels)
-    channels = diff.shape[1]
-    kernel_h = kernel_h.expand(channels, 1, -1, 1)
-    kernel_w = kernel_w.expand(channels, 1, 1, -1)
-
-    pad_h = kernel_size // 2
-    pad_w = kernel_size // 2
-
-    # Blur horizontally then vertically
-    diff_padded = torch.nn.functional.pad(diff.float(), (pad_w, pad_w, pad_h, pad_h), mode='reflect')
-    blurred = torch.nn.functional.conv2d(diff_padded, kernel_h.float(), groups=channels)
-    blurred = torch.nn.functional.conv2d(blurred, kernel_w.float(), groups=channels)
-
-    result = original + blend * blurred.to(dtype)
-
-    # Free intermediate tensors
-    del diff, blurred
-
-    # Restore temporal dimension if it was squeezed
-    if squeezed_temporal:
-        result = result.unsqueeze(2)
-
-    return result
 
 
 def _apply_dilated_blend(
     original: torch.Tensor,
     dilated: torch.Tensor,
     blend: float,
-    method: str,
     downscale_factor: float,
 ) -> torch.Tensor:
     """
-    Apply the specified blending method for dilated refinement.
+    Apply frequency-domain blending for dilated refinement.
+
+    Uses FFT to blend low frequencies from dilated with high frequencies from original,
+    which cleanly separates frequency bands and avoids grid artifacts.
 
     Args:
         original: The high-frequency source (pre-dilation latent)
         dilated: The low-frequency source (upsampled dilated result)
         blend: Blend ratio (0.0 = all original, 1.0 = all dilated)
-        method: One of 'linear', 'frequency', 'laplacian', 'gaussian'
         downscale_factor: The downscale factor used for dilation
 
     Returns:
         Blended tensor
     """
-    method = method.lower()
-
-    if method == "linear":
-        return torch.lerp(original, dilated, blend)
-    elif method == "frequency":
-        return _frequency_blend(original, dilated, blend, downscale_factor)
-    elif method == "laplacian":
-        return _laplacian_pyramid_blend(original, dilated, blend)
-    elif method == "gaussian":
-        blur_sigma = max(1.5, downscale_factor)  # Scale blur with downscale
-        return _gaussian_weighted_blend(original, dilated, blend, blur_sigma)
-    else:
-        logger.warning("Unknown dilated blend method '%s', falling back to linear.", method)
-        return torch.lerp(original, dilated, blend)
+    return _frequency_blend(original, dilated, blend, downscale_factor)
 
 
 @dataclass(frozen=True)
@@ -1162,19 +952,16 @@ def dilated_refinement(
     base_latent: dict,
     downscale_factor: float,
     blend: float,
-    blend_method: str = "frequency",
     min_steps: int = 1,
     use_same_seed: bool = False,
 ) -> torch.Tensor:
     """
     Run a coarse-grained refinement by downscaling, sampling, then upscaling back.
 
+    Uses frequency-domain blending to combine low frequencies from the dilated result
+    with high frequencies from the original, avoiding grid artifacts.
+
     Args:
-        blend_method: Blending strategy for combining dilated and original latents.
-            - 'linear': Simple linear interpolation (original behavior, may cause grid artifacts)
-            - 'frequency': FFT-based blending (recommended, cleanest separation)
-            - 'laplacian': Multi-scale pyramid blending (good for seamless compositing)
-            - 'gaussian': Gaussian-smoothed difference blending (simple artifact reduction)
         min_steps: Minimum number of sampling steps for dilated refinement. Default is 1.
             The actual steps used will be max(min_steps, steps // 2). For lightning models,
             consider setting this higher (e.g., 4) to ensure adequate sampling.
@@ -1254,12 +1041,11 @@ def dilated_refinement(
 
         _log_channel_stats("dilated_refinement/upsampled", upsampled)
 
-        # Apply the selected blending method
+        # Apply frequency-domain blending
         merged = _apply_dilated_blend(
             original=samples,
             dilated=upsampled,
             blend=blend,
-            method=blend_method,
             downscale_factor=downscale_factor,
         )
 
@@ -1462,12 +1248,6 @@ class FlowMatchingProgressiveUpscaler:
                     "step": 0.01,
                     "tooltip": "Blend weight of the dilated refinement result.",
                 }),
-                "dilated_blend_method": (_DILATED_BLEND_METHODS, {
-                    "default": "frequency",
-                    "tooltip": "Blending method for dilated refinement. 'frequency' (FFT-based, recommended), "
-                               "'laplacian' (multi-scale pyramid), 'gaussian' (smoothed difference), "
-                               "or 'linear' (simple lerp, may cause grid artifacts).",
-                }),
                 "dilated_min_steps": ("INT", {
                     "default": 1,
                     "min": 1,
@@ -1525,7 +1305,6 @@ class FlowMatchingProgressiveUpscaler:
         enable_dilated_sampling="enable",
         dilated_downscale=2.0,
         dilated_blend=0.25,
-        dilated_blend_method="frequency",
         dilated_min_steps=1,
         dilated_seed_mode="derive",
         cleanup_stage="disable",
@@ -1694,7 +1473,6 @@ class FlowMatchingProgressiveUpscaler:
                         base_latent=blended_dict,
                         downscale_factor=max(1.0, float(dilated_downscale)),
                         blend=dilated_blend,
-                        blend_method=dilated_blend_method,
                         min_steps=max(1, int(dilated_min_steps)),
                         use_same_seed=dilated_seed_mode == "same",
                     ),
@@ -1705,7 +1483,6 @@ class FlowMatchingProgressiveUpscaler:
                     original=blended,
                     dilated=dilated,
                     blend=dilated_blend,
-                    method=dilated_blend_method,
                     downscale_factor=max(1.0, float(dilated_downscale)),
                 )
                 _log_channel_stats(f"{stage_label} dilated/merged", blended)
@@ -1815,12 +1592,6 @@ class FlowMatchingStage:
                     "max": 1.0,
                     "step": 0.01,
                 }),
-                "dilated_blend_method": (_DILATED_BLEND_METHODS, {
-                    "default": "frequency",
-                    "tooltip": "Blending method for dilated refinement. 'frequency' (FFT-based, recommended), "
-                               "'laplacian' (multi-scale pyramid), 'gaussian' (smoothed difference), "
-                               "or 'linear' (simple lerp, may cause grid artifacts).",
-                }),
                 "dilated_min_steps": ("INT", {
                     "default": 1,
                     "min": 1,
@@ -1855,7 +1626,6 @@ class FlowMatchingStage:
         reduce_memory_use="enable",
         dilated_downscale=2.0,
         dilated_blend=0.25,
-        dilated_blend_method="frequency",
         dilated_min_steps=1,
         dilated_seed_mode="derive",
     ):
@@ -1884,7 +1654,6 @@ class FlowMatchingStage:
                     reduce_memory_flag=reduce_memory_flag,
                     dilated_downscale=dilated_downscale,
                     dilated_blend=dilated_blend,
-                    dilated_blend_method=dilated_blend_method,
                     dilated_min_steps=dilated_min_steps,
                     dilated_seed_mode=dilated_seed_mode,
                     streaming_enabled=streaming_enabled,
@@ -1920,7 +1689,6 @@ class FlowMatchingStage:
         reduce_memory_flag: bool,
         dilated_downscale,
         dilated_blend,
-        dilated_blend_method,
         dilated_min_steps,
         dilated_seed_mode,
         streaming_enabled: bool,
@@ -2030,7 +1798,6 @@ class FlowMatchingStage:
                         base_latent=blended_dict,
                         downscale_factor=max(1.0, float(dilated_downscale)),
                         blend=dilated_blend,
-                        blend_method=dilated_blend_method,
                         min_steps=max(1, int(dilated_min_steps)),
                         use_same_seed=dilated_seed_mode == "same",
                     ),
@@ -2043,7 +1810,6 @@ class FlowMatchingStage:
                 original=blended,
                 dilated=dilated,
                 blend=dilated_blend,
-                method=dilated_blend_method,
                 downscale_factor=max(1.0, float(dilated_downscale)),
             )
         else:
