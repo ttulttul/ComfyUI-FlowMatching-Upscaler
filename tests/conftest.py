@@ -126,12 +126,64 @@ def _ensure_comfy_stubs():
     sampling_module.ModelSamplingFlux = _ModelSamplingFlux
     sampling_module.flux_time_shift = _flux_time_shift
 
+    class _StubEmbedder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.theta = 10_000.0
+            self.axes_dim = [4, 4, 4]
+            self.patch_size = 2
+
+        def forward(self, ids: torch.Tensor) -> torch.Tensor:
+            batch = ids.shape[0]
+            tokens = ids.shape[1]
+            embedding_dim = sum(self.axes_dim) // 2
+            return torch.zeros(batch, 1, tokens, embedding_dim, 2, 2)
+
+    class _StubDiffusionModel:
+        def __init__(self):
+            self.pe_embedder = _StubEmbedder()
+            self.patch_size = 2
+            self.vae_scale_factor = 8
+            self.sample_size = (16, 16)
+            self.config = types.SimpleNamespace(
+                sample_size=self.sample_size,
+                patch_size=self.patch_size,
+                vae_scale_factor=self.vae_scale_factor,
+            )
+
+    class _ModelSamplingFlux:
+        def __init__(self):
+            self._dype_patched = False
+            self.sigma_max = torch.tensor(1.0)
+
+        def sigma(self, timestep: float):
+            return timestep
+
+    class _StubModelWrapper:
+        def __init__(self):
+            self.diffusion_model = _StubDiffusionModel()
+            self.model_sampling = _ModelSamplingFlux()
+
     class _ModelPatcherStub:
         def __init__(self):
-            self.model = types.SimpleNamespace()
+            self.model = _StubModelWrapper()
+            self._object_patches: dict[str, object] = {}
+            self._wrapper = None
 
         def clone(self):
-            return self
+            cloned = _ModelPatcherStub()
+            cloned.model = self.model
+            return cloned
+
+        def add_object_patch(self, path: str, obj) -> None:
+            self._object_patches[path] = obj
+            if path == "diffusion_model.pe_embedder":
+                self.model.diffusion_model.pe_embedder = obj
+            elif path == "model_sampling":
+                self.model.model_sampling = obj
+
+        def set_model_unet_function_wrapper(self, wrapper) -> None:
+            self._wrapper = wrapper
 
     model_patcher_module.ModelPatcher = _ModelPatcherStub
 

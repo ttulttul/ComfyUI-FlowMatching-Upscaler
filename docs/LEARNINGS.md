@@ -51,3 +51,9 @@
   the latent—otherwise sampler inputs drift after the first upscale. Keeping
   the mask synchronized per stage (and covering it with targeted tests) guards
   inpaint workflows against subtle misalignment bugs.
+- Pytest needs a richer `ModelPatcher` stub (diffusion model, embedder, and sampler)
+  so DyPE helpers can exercise their patches without tripping ValueErrors; mirroring
+  the live attributes in the shared test fixture keeps individual test modules simple.
+- Collapsing dilated refinement onto the FFT-based frequency blend removed the
+  method selector surface area—our tests now focus on validating that helper and the
+  multi-frame lerp fallback instead of juggling several legacy modes.

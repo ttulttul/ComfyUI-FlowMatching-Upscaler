@@ -74,16 +74,9 @@ Dilated sampling adds a coarse refinement lap immediately after the main sampler
 
 *Use this to suppress high-frequency hallucinations (like extra pores or glittering artifacts).*
 
-##### Dilated Blend Methods
+##### Dilated Blend Strategy
 
-The `dilated_blend_method` parameter controls how the dilated (low-pass) result is combined with the original latent. At high blend ratios (0.5+), simple linear blending can introduce grid-like artifacts. The alternative methods avoid this:
-
-| Method | Description | Best For |
-|--------|-------------|----------|
-| **frequency** | FFT-based blending that cleanly separates frequency bands. Takes low frequencies from the dilated result and high frequencies from the original. | **Default.** Cleanest results, no grid artifacts. |
-| **laplacian** | Multi-scale Laplacian pyramid blending. Coarse levels favor dilated, fine levels favor original. | Seamless compositing, smooth transitions. |
-| **gaussian** | Applies Gaussian blur to the difference before blending. | Simple artifact reduction. |
-| **linear** | Simple `torch.lerp` interpolation. | Compatibility with original behavior. May cause grid artifacts at high blend ratios. |
+Dilated refinement now always uses a frequency-domain blend when recombining the low-pass latent with the original samples. The FFT-based mix pulls low frequencies from the dilated pass and preserves high-frequency detail from the base latent, which consistently avoids the grid artifacts that the alternative modes were designed to mitigate. With this default in place, no explicit blend selector is required.
 
 ### Usage Tips
 
@@ -124,7 +117,6 @@ The `dilated_blend_method` parameter controls how the dilated (low-pass) result 
 | `enable_dilated_sampling` | enum | `"enable"` | Adds the dilated refinement pass. |
 | `dilated_downscale` | FLOAT | `2.0` | Downscale factor for dilation. |
 | `dilated_blend` | FLOAT | `0.25` | Blend weight of the dilated result. |
-| `dilated_blend_method` | enum | `"frequency"` | Blending strategy: `frequency`, `laplacian`, `gaussian`, or `linear`. See [Dilated Blend Methods](#dilated-blend-methods). |
 | `cleanup_stage` | enum | `"disable"` | Adds an extra non-scaling polish stage. |
 
 ### Modular Nodes
@@ -139,7 +131,7 @@ Chain these nodes manually for caching benefits.
 *   `noise_ratio`: Amount of flow-noise to inject.
 *   `skip_blend`: Blend factor between pre-sampler latent and denoised result.
 *   `next_seed`: Connect this output to the `seed` of the next stage for deterministic chains.
-*   `dilated_blend_method`: Blending strategy for dilated sampling (when enabled).
+*   Dilated refinement blends results in the frequency domain automatically—no manual method selection is required.
 
 #### 2. LatentChannelStatsPreview
 A lightweight debug node that visualizes latent channel statistics (Means = Blue, Std Dev = Orange). Useful for spotting channels that dominate energy budgets.
