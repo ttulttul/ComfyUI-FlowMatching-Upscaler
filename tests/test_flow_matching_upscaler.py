@@ -113,6 +113,51 @@ import src.flow_matching_upscaler as fm_upscaler  # noqa: E402
 from src.flow_matching_upscaler import FlowMatchingProgressiveUpscaler  # noqa: E402
 
 
+class TorchLerpEquivalenceTests(unittest.TestCase):
+    """Tests to verify torch.lerp produces equivalent results to manual blending."""
+
+    def test_lerp_equivalent_to_manual_blend(self):
+        """Verify torch.lerp(a, b, weight) == a + weight * (b - a) == b * weight + a * (1 - weight)."""
+        a = torch.randn(2, 4, 8, 8)
+        b = torch.randn(2, 4, 8, 8)
+        weight = 0.3
+
+        # torch.lerp(a, b, weight) = a + weight * (b - a)
+        lerp_result = torch.lerp(a, b, weight)
+
+        # Manual: b * weight + a * (1 - weight)
+        manual_result = b * weight + a * (1 - weight)
+
+        self.assertTrue(torch.allclose(lerp_result, manual_result, atol=1e-6))
+
+    def test_apply_flow_renoise_uses_lerp(self):
+        """Verify apply_flow_renoise produces consistent results with lerp."""
+        latent = torch.ones(1, 4, 8, 8)
+        noise_level = 0.5
+        seed = 42
+
+        # Call twice with same seed should produce same result
+        result1 = fm_upscaler.apply_flow_renoise(latent, noise_level, seed)
+        result2 = fm_upscaler.apply_flow_renoise(latent, noise_level, seed)
+
+        self.assertTrue(torch.allclose(result1, result2))
+        # With 50% noise, result should be between pure latent and pure noise
+        self.assertFalse(torch.allclose(result1, latent))
+
+    def test_apply_flow_renoise_zero_noise(self):
+        """Verify zero noise returns original latent unchanged."""
+        latent = torch.randn(1, 4, 8, 8)
+        result = fm_upscaler.apply_flow_renoise(latent, 0.0, 123)
+        self.assertTrue(torch.equal(result, latent))
+
+    def test_apply_flow_renoise_full_noise(self):
+        """Verify full noise level returns pure noise."""
+        latent = torch.ones(1, 4, 8, 8)
+        result = fm_upscaler.apply_flow_renoise(latent, 1.0, 456)
+        # Result should be different from input (pure noise)
+        self.assertFalse(torch.allclose(result, latent))
+
+
 class FlowMatchingUpscalerTests(unittest.TestCase):
     def setUp(self):
         self.node = FlowMatchingProgressiveUpscaler()

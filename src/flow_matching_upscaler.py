@@ -358,13 +358,14 @@ def progressive_upscale_latent(
             )
             upscale_method = "bicubic"
 
-    upscaled = comfy.utils.common_upscale(
-        latent,
-        width,
-        height,
-        upscale_method,
-        crop="disabled",
-    )
+    with torch.no_grad():
+        upscaled = comfy.utils.common_upscale(
+            latent,
+            width,
+            height,
+            upscale_method,
+            crop="disabled",
+        )
     return upscaled
 
 
@@ -418,15 +419,16 @@ def apply_flow_renoise(
     if noise_level <= 0.0:
         return latent
 
-    generator = torch.Generator(device="cpu").manual_seed(seed)
-    noise = torch.randn(latent.shape, generator=generator, device="cpu", dtype=latent.dtype)
+    with torch.no_grad():
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        noise = torch.randn(latent.shape, generator=generator, device="cpu", dtype=latent.dtype)
 
-    if latent.device != noise.device:
-        noise = noise.to(latent.device)
+        if latent.device != noise.device:
+            noise = noise.to(latent.device)
 
-    noise_level = max(0.0, min(1.0, float(noise_level)))
-    blended = latent * (1.0 - noise_level) + noise * noise_level
-    return blended
+        noise_level = max(0.0, min(1.0, float(noise_level)))
+        blended = torch.lerp(latent, noise, noise_level)
+        return blended
 
 
 def _prepare_latent_for_sampler(latent_dict: dict) -> Tuple[dict, callable]:
@@ -860,13 +862,14 @@ def dilated_refinement(
         logger.debug("Dilated refinement skipped due to excessive downscale (target too small).")
         return samples
 
-    downsampled = comfy.utils.common_upscale(
-        samples,
-        down_width,
-        down_height,
-        "area",
-        crop="disabled",
-    )
+    with torch.no_grad():
+        downsampled = comfy.utils.common_upscale(
+            samples,
+            down_width,
+            down_height,
+            "area",
+            crop="disabled",
+        )
 
     latent_copy = base_latent.copy()
     latent_copy["samples"] = downsampled
@@ -901,17 +904,18 @@ def dilated_refinement(
 
     _log_channel_stats("dilated_refinement/refined", refined_down["samples"])
 
-    upsampled = comfy.utils.common_upscale(
-        refined_down["samples"],
-        samples.shape[-1],
-        samples.shape[-2],
-        "bilinear",
-        crop="disabled",
-    )
+    with torch.no_grad():
+        upsampled = comfy.utils.common_upscale(
+            refined_down["samples"],
+            samples.shape[-1],
+            samples.shape[-2],
+            "bilinear",
+            crop="disabled",
+        )
 
-    _log_channel_stats("dilated_refinement/upsampled", upsampled)
+        _log_channel_stats("dilated_refinement/upsampled", upsampled)
 
-    merged = samples * (1.0 - blend) + upsampled * blend
+        merged = torch.lerp(samples, upsampled, blend)
     _log_channel_stats("dilated_refinement/merged", merged)
     return merged
 
@@ -1282,6 +1286,9 @@ class FlowMatchingProgressiveUpscaler:
                 description=f"{stage_label} sampling",
             )
 
+            # Free intermediate tensors no longer needed after sampling
+            del latent_payload, sampler_payload
+
             restored_samples = restore_fn(refined_dict["samples"])
             if restored_samples is not refined_dict["samples"]:
                 refined_dict = refined_dict.copy()
@@ -1297,11 +1304,13 @@ class FlowMatchingProgressiveUpscaler:
                 )
 
             _log_channel_stats(f"{stage_label} refined", refined_samples)
-            blended = skip_reference * stage.skip_blend + refined_samples * (1.0 - stage.skip_blend)
+            blended = torch.lerp(refined_samples, skip_reference, stage.skip_blend)
             _log_channel_stats(f"{stage_label} blended", blended)
 
             if enable_dilated_sampling == "enable" and not stage.is_cleanup:
                 blended_dict = refined_dict.copy()
+                # Free refined_dict now that blended_dict has been created
+                del refined_dict
                 blended_dict["samples"] = blended
                 _log_channel_stats(f"{stage_label} dilated/base", blended)
                 dilated = _run_with_oom_retry(
@@ -1322,8 +1331,11 @@ class FlowMatchingProgressiveUpscaler:
                     description=f"{stage_label} dilated refinement",
                 )
                 _log_channel_stats(f"{stage_label} dilated/result", dilated)
-                blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
+                blended = torch.lerp(blended, dilated, dilated_blend)
                 _log_channel_stats(f"{stage_label} dilated/merged", blended)
+            else:
+                # Free refined_dict when dilated sampling is skipped
+                del refined_dict
 
             current_latent = blended
             current_latent_dict["samples"] = current_latent
@@ -1577,6 +1589,9 @@ class FlowMatchingStage:
             description=description,
         )
 
+        # Free sampler_payload now that sampling is done
+        del sampler_payload
+
         restored_samples = restore_fn(refined_dict["samples"])
         if restored_samples is not refined_dict["samples"]:
             refined_dict = refined_dict.copy()
@@ -1591,10 +1606,12 @@ class FlowMatchingStage:
                 crop="disabled",
             )
 
-        blended = skip_reference * skip_blend + refined_samples * (1.0 - skip_blend)
+        blended = torch.lerp(refined_samples, skip_reference, skip_blend)
 
         if enable_dilated_sampling == "enable":
             blended_dict = refined_dict.copy()
+            # Free refined_dict now that blended_dict has been created
+            del refined_dict
             blended_dict["samples"] = blended
             dilated = _run_with_oom_retry(
                 lambda: _execute_with_memory_controls(
@@ -1617,10 +1634,9 @@ class FlowMatchingStage:
                 ),
                 description="stage dilated refinement" + (" (streaming fallback)" if streaming_enabled else ""),
             )
-            blended = blended * (1.0 - dilated_blend) + dilated * dilated_blend
-
-            # Delete the sampler output dict if no longer needed before the next
-            # assignment to help garbage collection.
+            blended = torch.lerp(blended, dilated, dilated_blend)
+        else:
+            # Free refined_dict when dilated sampling is skipped
             del refined_dict
 
         out = current_latent_dict.copy()

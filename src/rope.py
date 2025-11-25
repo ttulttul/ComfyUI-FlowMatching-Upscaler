@@ -27,6 +27,7 @@ def find_newbase_ntk(dim, base, scale):
     return base * (scale ** (dim / (dim - 2)))
 
 
+@torch.no_grad()
 def get_1d_rotary_pos_embed(
     dim: int,
     pos: torch.Tensor,

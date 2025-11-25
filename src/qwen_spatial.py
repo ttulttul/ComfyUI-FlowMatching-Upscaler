@@ -1,5 +1,4 @@
 import logging
-import types
 from dataclasses import dataclass
 from typing import Iterable, Tuple
 
@@ -95,6 +94,45 @@ def _select_freq_dtype(backing_embedder: nn.Module, device: torch.device) -> tor
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
+
+
+class _DyPEModelSampling:
+    """
+    Wrapper that provides DyPE-adjusted sigma without mutating the original sampler.
+
+    This class wraps an existing model_sampling object and overrides the sigma
+    method to apply DyPE shift adjustments. All other attributes are delegated
+    to the wrapped sampler.
+    """
+
+    def __init__(self, wrapped_sampler, dype_shift: float, is_flux: bool):
+        # Store reference to wrapped sampler and config
+        object.__setattr__(self, "_wrapped", wrapped_sampler)
+        object.__setattr__(self, "_dype_shift", dype_shift)
+        object.__setattr__(self, "_is_flux", is_flux)
+
+    def sigma(self, timestep):
+        if self._is_flux:
+            return model_sampling.flux_time_shift(self._dype_shift, 1.0, timestep)
+        else:
+            # Fallback: scale the original sigma
+            baseline = self._wrapped.sigma(timestep)
+            scale = 1.0 + max(self._dype_shift, 0.0) * 0.1
+            try:
+                return baseline * scale
+            except TypeError:
+                return float(baseline) * scale
+
+    def __getattr__(self, name: str):
+        # Delegate all other attribute access to wrapped sampler
+        return getattr(self._wrapped, name)
+
+    def __setattr__(self, name: str, value):
+        # Prevent accidental mutation; delegate to wrapped if needed
+        if name in ("_wrapped", "_dype_shift", "_is_flux"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._wrapped, name, value)
 
 
 class QwenSpatialPosEmbed(nn.Module):
@@ -218,10 +256,13 @@ class QwenSpatialPosEmbed(nn.Module):
         diff1 = (axis1 - axis0).abs()
         diff2 = (axis2 - axis0).abs()
         image_mask = torch.logical_or(diff1 > 1e-4, diff2 > 1e-4)
+        # Free intermediate tensors early
+        del diff1, diff2
 
         grid = self.grid
         current_h = _estimate_axis_extent(axis1, image_mask, grid.base_axes[0])
         current_w = _estimate_axis_extent(axis2, image_mask, grid.base_axes[1])
+        del image_mask  # No longer needed
         current_ctx = max(current_h * current_w, 1)
 
         target_h = min(grid.max_axes[0], current_h)
@@ -329,7 +370,7 @@ class QwenSpatialPosEmbed(nn.Module):
                     )
                     mode = "static"
 
-            logger.info(
+            logger.debug(
                 "axis=%s base_len=%d current_len=%d target_len=%d method=%s "
                 "enable_dype=%s editing=%s editing_strength=%.3f timestep=%.4f "
                 "ramp_factor=%.4f mode=%s%s",
@@ -351,10 +392,14 @@ class QwenSpatialPosEmbed(nn.Module):
             sin_reshaped = sin.view(*sin.shape[:-1], -1, 2)[..., :1]
             row1 = torch.cat([cos_reshaped, -sin_reshaped], dim=-1)
             row2 = torch.cat([sin_reshaped, cos_reshaped], dim=-1)
+            # Free cos/sin tensors before stacking
+            del cos, sin, cos_reshaped, sin_reshaped
             matrix = torch.stack([row1, row2], dim=-2)
+            del row1, row2  # Free intermediate rows
             emb_parts.append(matrix)
 
         emb = torch.cat(emb_parts, dim=-3)
+        del emb_parts  # Free the list of matrices
         return emb.unsqueeze(1).to(ids.device)
 
 
@@ -565,34 +610,18 @@ def apply_dype_to_qwen_image(
     intercept = base_shift - slope * base_seq_len
     dype_shift = current_seq_len * slope + intercept
 
-    sampler_patched = False
-    if enable_dype and model_sampler is not None and not getattr(model_sampler, "_dype_patched", False):
-        if isinstance(model_sampler, model_sampling.ModelSamplingFlux):
-            def patched_sigma_func(self, timestep):
-                return model_sampling.flux_time_shift(dype_shift, 1.0, timestep)
+    # Patch model_sampling using a wrapper to avoid mutating the shared object.
+    # The wrapper delegates all attributes to the original sampler except sigma.
+    if enable_dype and model_sampler is not None:
+        is_flux = isinstance(model_sampler, model_sampling.ModelSamplingFlux)
+        has_sigma = hasattr(model_sampler, "sigma") and callable(getattr(model_sampler, "sigma"))
 
-            model_sampler.sigma = types.MethodType(patched_sigma_func, model_sampler)
-            sampler_patched = True
-        elif hasattr(model_sampler, "sigma") and callable(getattr(model_sampler, "sigma")):
-            original_sigma = model_sampler.sigma
-
-            def patched_sigma_func(self, timestep):
-                baseline = original_sigma(timestep)
-                scale = 1.0 + max(dype_shift, 0.0) * 0.1
-                try:
-                    return baseline * scale
-                except TypeError:
-                    baseline_value = float(baseline)
-                    return baseline_value * scale
-
-            model_sampler.sigma = types.MethodType(patched_sigma_func, model_sampler)
-            sampler_patched = True
-
-        if sampler_patched:
-            setattr(model_sampler, "_dype_patched", True)
+        if is_flux or has_sigma:
+            wrapped_sampler = _DyPEModelSampling(model_sampler, dype_shift, is_flux)
+            cloned.add_object_patch("model_sampling", wrapped_sampler)
             logger.info(
-                "DyPE_QwenImage: installed sampler shift (fallback=%s, dype_shift=%.4f).",
-                not isinstance(model_sampler, model_sampling.ModelSamplingFlux),
+                "DyPE_QwenImage: installed sampler shift via wrapper (is_flux=%s, dype_shift=%.4f).",
+                is_flux,
                 dype_shift,
             )
 
