@@ -1085,6 +1085,8 @@ def dilated_refinement(
     downscale_factor: float,
     blend: float,
     blend_method: str = "frequency",
+    min_steps: int = 1,
+    use_same_seed: bool = False,
 ) -> torch.Tensor:
     """
     Run a coarse-grained refinement by downscaling, sampling, then upscaling back.
@@ -1095,6 +1097,11 @@ def dilated_refinement(
             - 'frequency': FFT-based blending (recommended, cleanest separation)
             - 'laplacian': Multi-scale pyramid blending (good for seamless compositing)
             - 'gaussian': Gaussian-smoothed difference blending (simple artifact reduction)
+        min_steps: Minimum number of sampling steps for dilated refinement. Default is 1.
+            The actual steps used will be max(min_steps, steps // 2). For lightning models,
+            consider setting this higher (e.g., 4) to ensure adequate sampling.
+        use_same_seed: If True, use the same seed as the main sampling pass. If False
+            (default), derive a new seed by adding 10_000 to the base seed.
     """
     blend = max(0.0, min(1.0, blend))
     if blend == 0.0:
@@ -1134,6 +1141,9 @@ def dilated_refinement(
 
     sampler_payload, restore_fn = _prepare_latent_for_sampler(latent_copy)
 
+    dilated_steps = max(min_steps, steps // 2)
+    dilated_seed = seed if use_same_seed else seed + 10_000
+
     refined_down = run_sampler(
         model=model,
         positive=positive,
@@ -1142,8 +1152,8 @@ def dilated_refinement(
         sampler_name=sampler_name,
         scheduler=scheduler,
         cfg=cfg,
-        steps=max(1, steps // 2),
-        seed=seed + 10_000,
+        steps=dilated_steps,
+        seed=dilated_seed,
         denoise=denoise,
     )
 
@@ -1380,6 +1390,17 @@ class FlowMatchingProgressiveUpscaler:
                                "'laplacian' (multi-scale pyramid), 'gaussian' (smoothed difference), "
                                "or 'linear' (simple lerp, may cause grid artifacts).",
                 }),
+                "dilated_min_steps": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 256,
+                    "tooltip": "Minimum sampling steps for dilated refinement. Actual steps = max(min_steps, steps // 2). "
+                               "Increase for lightning models to ensure adequate sampling (e.g., 4).",
+                }),
+                "dilated_seed_mode": (["derive", "same"], {
+                    "default": "derive",
+                    "tooltip": "Seed mode for dilated sampling. 'derive' adds 10,000 to base seed, 'same' uses identical seed.",
+                }),
                 "cleanup_stage": (["disable", "enable"], {
                     "default": "disable",
                     "tooltip": "Run an extra non-scaling clean-up denoise pass at the end.",
@@ -1427,6 +1448,8 @@ class FlowMatchingProgressiveUpscaler:
         dilated_downscale=2.0,
         dilated_blend=0.25,
         dilated_blend_method="frequency",
+        dilated_min_steps=1,
+        dilated_seed_mode="derive",
         cleanup_stage="disable",
         cleanup_noise=0.0,
         cleanup_denoise=0.4,
@@ -1594,6 +1617,8 @@ class FlowMatchingProgressiveUpscaler:
                         downscale_factor=max(1.0, float(dilated_downscale)),
                         blend=dilated_blend,
                         blend_method=dilated_blend_method,
+                        min_steps=max(1, int(dilated_min_steps)),
+                        use_same_seed=dilated_seed_mode == "same",
                     ),
                     description=f"{stage_label} dilated refinement",
                 )
@@ -1718,6 +1743,17 @@ class FlowMatchingStage:
                                "'laplacian' (multi-scale pyramid), 'gaussian' (smoothed difference), "
                                "or 'linear' (simple lerp, may cause grid artifacts).",
                 }),
+                "dilated_min_steps": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 256,
+                    "tooltip": "Minimum sampling steps for dilated refinement. Actual steps = max(min_steps, steps // 2). "
+                               "Increase for lightning models to ensure adequate sampling (e.g., 4).",
+                }),
+                "dilated_seed_mode": (["derive", "same"], {
+                    "default": "derive",
+                    "tooltip": "Seed mode for dilated sampling. 'derive' adds 10,000 to base seed, 'same' uses identical seed.",
+                }),
             },
         }
 
@@ -1742,6 +1778,8 @@ class FlowMatchingStage:
         dilated_downscale=2.0,
         dilated_blend=0.25,
         dilated_blend_method="frequency",
+        dilated_min_steps=1,
+        dilated_seed_mode="derive",
     ):
         skip_blend = max(0.0, min(1.0, skip_blend))
         reduce_memory_flag = reduce_memory_use == "enable"
@@ -1769,6 +1807,8 @@ class FlowMatchingStage:
                     dilated_downscale=dilated_downscale,
                     dilated_blend=dilated_blend,
                     dilated_blend_method=dilated_blend_method,
+                    dilated_min_steps=dilated_min_steps,
+                    dilated_seed_mode=dilated_seed_mode,
                     streaming_enabled=streaming_enabled,
                 )
             except BaseException as exc:
@@ -1803,6 +1843,8 @@ class FlowMatchingStage:
         dilated_downscale,
         dilated_blend,
         dilated_blend_method,
+        dilated_min_steps,
+        dilated_seed_mode,
         streaming_enabled: bool,
     ):
         current_latent_dict = latent.copy()
@@ -1911,6 +1953,8 @@ class FlowMatchingStage:
                         downscale_factor=max(1.0, float(dilated_downscale)),
                         blend=dilated_blend,
                         blend_method=dilated_blend_method,
+                        min_steps=max(1, int(dilated_min_steps)),
+                        use_same_seed=dilated_seed_mode == "same",
                     ),
                     attention_budget_mb=attention_budget,
                     enable_low_vram=low_vram,
