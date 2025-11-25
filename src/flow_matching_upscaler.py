@@ -325,6 +325,10 @@ def _frequency_blend(
     if squeezed_temporal:
         result = result.unsqueeze(2)
 
+    # Restore temporal dimension if it was squeezed
+    if squeezed_temporal:
+        result = result.unsqueeze(2)
+
     return result
 
 
