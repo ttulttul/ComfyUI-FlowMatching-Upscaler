@@ -244,6 +244,248 @@ def _draw_text(canvas: np.ndarray, text: str, x: int, y: int, color: np.ndarray)
         cursor += glyph_width + 1
 
 
+# Dilated blending method constants
+_DILATED_BLEND_METHODS: Tuple[str, ...] = ("linear", "frequency", "laplacian", "gaussian")
+
+
+def _frequency_blend(
+    original: torch.Tensor,
+    dilated: torch.Tensor,
+    blend: float,
+    downscale_factor: float,
+) -> torch.Tensor:
+    """
+    Blend in the frequency domain: low frequencies from dilated, high from original.
+
+    This approach cleanly separates frequency bands to avoid grid artifacts.
+    The cutoff is derived from the downscale factor.
+    """
+    if blend <= 0.0:
+        return original
+    if blend >= 1.0:
+        return dilated
+
+    device = original.device
+    dtype = original.dtype
+
+    # Work in float32 for FFT precision
+    orig_f32 = original.float()
+    dilated_f32 = dilated.float()
+
+    h, w = original.shape[-2:]
+
+    # Compute FFT (shift so DC is centered)
+    fft_orig = torch.fft.fftshift(torch.fft.fft2(orig_f32, dim=(-2, -1)), dim=(-2, -1))
+    fft_dilated = torch.fft.fftshift(torch.fft.fft2(dilated_f32, dim=(-2, -1)), dim=(-2, -1))
+
+    # Create Gaussian low-pass mask
+    # Cutoff ratio inversely related to downscale factor
+    cutoff_ratio = 1.0 / max(downscale_factor, 1.0)
+    sigma_h = cutoff_ratio * h * 0.5
+    sigma_w = cutoff_ratio * w * 0.5
+
+    cy, cx = h / 2.0, w / 2.0
+    y = torch.arange(h, device=device, dtype=torch.float32) - cy
+    x = torch.arange(w, device=device, dtype=torch.float32) - cx
+    yy, xx = torch.meshgrid(y, x, indexing='ij')
+
+    # Gaussian mask (1 at center/low freq, 0 at edges/high freq)
+    low_pass_mask = torch.exp(-0.5 * ((xx / max(sigma_w, 1e-6))**2 + (yy / max(sigma_h, 1e-6))**2))
+
+    # Expand mask to match tensor dimensions
+    while low_pass_mask.ndim < fft_orig.ndim:
+        low_pass_mask = low_pass_mask.unsqueeze(0)
+
+    # Scale mask by blend factor
+    # At blend=1.0: fully use dilated low-freq
+    # At blend=0.5: 50% dilated low-freq contribution
+    effective_mask = low_pass_mask * blend
+
+    # Blend: take weighted low frequencies from dilated, rest from original
+    fft_blended = fft_orig * (1 - effective_mask) + fft_dilated * effective_mask
+
+    # Inverse FFT
+    result = torch.fft.ifft2(torch.fft.ifftshift(fft_blended, dim=(-2, -1)), dim=(-2, -1)).real
+
+    # Free intermediate tensors
+    del fft_orig, fft_dilated, fft_blended, low_pass_mask, effective_mask
+
+    return result.to(dtype)
+
+
+def _laplacian_pyramid_blend(
+    original: torch.Tensor,
+    dilated: torch.Tensor,
+    blend: float,
+    levels: int = 4,
+) -> torch.Tensor:
+    """
+    Blend using Laplacian pyramids for seamless multi-scale compositing.
+
+    Coarse levels get more dilated influence, fine levels get less.
+    This naturally avoids grid artifacts by handling each scale separately.
+    """
+    if blend <= 0.0:
+        return original
+    if blend >= 1.0:
+        return dilated
+
+    # Ensure minimum spatial dimensions for pyramid levels
+    min_dim = min(original.shape[-2], original.shape[-1])
+    max_levels = max(1, int(math.log2(min_dim)) - 2)
+    levels = min(levels, max_levels)
+
+    if levels < 2:
+        # Fall back to linear blend if image too small
+        return torch.lerp(original, dilated, blend)
+
+    def _build_gaussian_pyramid(img: torch.Tensor, num_levels: int) -> List[torch.Tensor]:
+        pyramid = [img]
+        current = img
+        for _ in range(num_levels - 1):
+            # Downsample by 2x using area averaging
+            h, w = current.shape[-2], current.shape[-1]
+            new_h, new_w = max(1, h // 2), max(1, w // 2)
+            current = torch.nn.functional.interpolate(
+                current, size=(new_h, new_w), mode='area'
+            )
+            pyramid.append(current)
+        return pyramid
+
+    def _build_laplacian_pyramid(img: torch.Tensor, num_levels: int) -> List[torch.Tensor]:
+        gaussian = _build_gaussian_pyramid(img, num_levels)
+        laplacian = []
+        for i in range(num_levels - 1):
+            h, w = gaussian[i].shape[-2], gaussian[i].shape[-1]
+            upsampled = torch.nn.functional.interpolate(
+                gaussian[i + 1], size=(h, w), mode='bilinear', align_corners=False
+            )
+            laplacian.append(gaussian[i] - upsampled)
+        laplacian.append(gaussian[-1])  # Residual (lowest frequency)
+        return laplacian
+
+    # Build pyramids
+    pyr_orig = _build_laplacian_pyramid(original, levels)
+    pyr_dilated = _build_laplacian_pyramid(dilated, levels)
+
+    # Blend weights: more dilated influence at coarse levels (end of list)
+    # Less at fine levels (start of list)
+    pyr_blended = []
+    for i in range(levels):
+        # Level 0 is finest (high freq), level n-1 is coarsest (low freq)
+        # Dilated should contribute more to low frequencies
+        level_blend = blend * (0.2 + 0.8 * (i / max(levels - 1, 1)))
+        blended_level = torch.lerp(pyr_orig[i], pyr_dilated[i], level_blend)
+        pyr_blended.append(blended_level)
+
+    # Reconstruct from blended pyramid
+    result = pyr_blended[-1]
+    for i in range(levels - 2, -1, -1):
+        h, w = pyr_blended[i].shape[-2], pyr_blended[i].shape[-1]
+        result = torch.nn.functional.interpolate(
+            result, size=(h, w), mode='bilinear', align_corners=False
+        )
+        result = result + pyr_blended[i]
+
+    # Free pyramid tensors
+    del pyr_orig, pyr_dilated, pyr_blended
+
+    return result
+
+
+def _gaussian_weighted_blend(
+    original: torch.Tensor,
+    dilated: torch.Tensor,
+    blend: float,
+    blur_sigma: float = 2.0,
+) -> torch.Tensor:
+    """
+    Blend by applying Gaussian blur to the difference before adding.
+
+    This smooths out any grid artifacts from the upscaling step.
+    """
+    if blend <= 0.0:
+        return original
+    if blend >= 1.0:
+        return dilated
+
+    # Compute difference
+    diff = dilated - original
+
+    # Apply Gaussian blur to smooth grid artifacts
+    kernel_size = int(blur_sigma * 4) | 1  # Ensure odd
+    kernel_size = max(3, min(kernel_size, 31))  # Clamp to reasonable range
+
+    # Build Gaussian kernel
+    device = diff.device
+    dtype = diff.dtype
+
+    x = torch.arange(kernel_size, device=device, dtype=torch.float32) - kernel_size // 2
+    gaussian_1d = torch.exp(-0.5 * (x / blur_sigma) ** 2)
+    gaussian_1d = gaussian_1d / gaussian_1d.sum()
+
+    # Separable 2D Gaussian via two 1D convolutions
+    # Reshape for conv2d: (out_channels, in_channels/groups, kH, kW)
+    kernel_h = gaussian_1d.view(1, 1, -1, 1)
+    kernel_w = gaussian_1d.view(1, 1, 1, -1)
+
+    # Apply per-channel (groups=channels)
+    channels = diff.shape[1]
+    kernel_h = kernel_h.expand(channels, 1, -1, 1)
+    kernel_w = kernel_w.expand(channels, 1, 1, -1)
+
+    pad_h = kernel_size // 2
+    pad_w = kernel_size // 2
+
+    # Blur horizontally then vertically
+    diff_padded = torch.nn.functional.pad(diff.float(), (pad_w, pad_w, pad_h, pad_h), mode='reflect')
+    blurred = torch.nn.functional.conv2d(diff_padded, kernel_h.float(), groups=channels)
+    blurred = torch.nn.functional.conv2d(blurred, kernel_w.float(), groups=channels)
+
+    result = original + blend * blurred.to(dtype)
+
+    # Free intermediate tensors
+    del diff, blurred
+
+    return result
+
+
+def _apply_dilated_blend(
+    original: torch.Tensor,
+    dilated: torch.Tensor,
+    blend: float,
+    method: str,
+    downscale_factor: float,
+) -> torch.Tensor:
+    """
+    Apply the specified blending method for dilated refinement.
+
+    Args:
+        original: The high-frequency source (pre-dilation latent)
+        dilated: The low-frequency source (upsampled dilated result)
+        blend: Blend ratio (0.0 = all original, 1.0 = all dilated)
+        method: One of 'linear', 'frequency', 'laplacian', 'gaussian'
+        downscale_factor: The downscale factor used for dilation
+
+    Returns:
+        Blended tensor
+    """
+    method = method.lower()
+
+    if method == "linear":
+        return torch.lerp(original, dilated, blend)
+    elif method == "frequency":
+        return _frequency_blend(original, dilated, blend, downscale_factor)
+    elif method == "laplacian":
+        return _laplacian_pyramid_blend(original, dilated, blend)
+    elif method == "gaussian":
+        blur_sigma = max(1.5, downscale_factor)  # Scale blur with downscale
+        return _gaussian_weighted_blend(original, dilated, blend, blur_sigma)
+    else:
+        logger.warning("Unknown dilated blend method '%s', falling back to linear.", method)
+        return torch.lerp(original, dilated, blend)
+
+
 @dataclass(frozen=True)
 class StageConfig:
     """Resolved configuration for a single progressive upscale stage."""
@@ -842,9 +1084,17 @@ def dilated_refinement(
     base_latent: dict,
     downscale_factor: float,
     blend: float,
+    blend_method: str = "frequency",
 ) -> torch.Tensor:
     """
     Run a coarse-grained refinement by downscaling, sampling, then upscaling back.
+
+    Args:
+        blend_method: Blending strategy for combining dilated and original latents.
+            - 'linear': Simple linear interpolation (original behavior, may cause grid artifacts)
+            - 'frequency': FFT-based blending (recommended, cleanest separation)
+            - 'laplacian': Multi-scale pyramid blending (good for seamless compositing)
+            - 'gaussian': Gaussian-smoothed difference blending (simple artifact reduction)
     """
     blend = max(0.0, min(1.0, blend))
     if blend == 0.0:
@@ -905,17 +1155,26 @@ def dilated_refinement(
     _log_channel_stats("dilated_refinement/refined", refined_down["samples"])
 
     with torch.no_grad():
+        # Use bicubic for smoother upsampling (reduces grid artifacts)
         upsampled = comfy.utils.common_upscale(
             refined_down["samples"],
             samples.shape[-1],
             samples.shape[-2],
-            "bilinear",
+            "bicubic",
             crop="disabled",
         )
 
         _log_channel_stats("dilated_refinement/upsampled", upsampled)
 
-        merged = torch.lerp(samples, upsampled, blend)
+        # Apply the selected blending method
+        merged = _apply_dilated_blend(
+            original=samples,
+            dilated=upsampled,
+            blend=blend,
+            method=blend_method,
+            downscale_factor=downscale_factor,
+        )
+
     _log_channel_stats("dilated_refinement/merged", merged)
     return merged
 
@@ -1115,6 +1374,12 @@ class FlowMatchingProgressiveUpscaler:
                     "step": 0.01,
                     "tooltip": "Blend weight of the dilated refinement result.",
                 }),
+                "dilated_blend_method": (_DILATED_BLEND_METHODS, {
+                    "default": "frequency",
+                    "tooltip": "Blending method for dilated refinement. 'frequency' (FFT-based, recommended), "
+                               "'laplacian' (multi-scale pyramid), 'gaussian' (smoothed difference), "
+                               "or 'linear' (simple lerp, may cause grid artifacts).",
+                }),
                 "cleanup_stage": (["disable", "enable"], {
                     "default": "disable",
                     "tooltip": "Run an extra non-scaling clean-up denoise pass at the end.",
@@ -1161,6 +1426,7 @@ class FlowMatchingProgressiveUpscaler:
         enable_dilated_sampling="enable",
         dilated_downscale=2.0,
         dilated_blend=0.25,
+        dilated_blend_method="frequency",
         cleanup_stage="disable",
         cleanup_noise=0.0,
         cleanup_denoise=0.4,
@@ -1327,11 +1593,18 @@ class FlowMatchingProgressiveUpscaler:
                         base_latent=blended_dict,
                         downscale_factor=max(1.0, float(dilated_downscale)),
                         blend=dilated_blend,
+                        blend_method=dilated_blend_method,
                     ),
                     description=f"{stage_label} dilated refinement",
                 )
                 _log_channel_stats(f"{stage_label} dilated/result", dilated)
-                blended = torch.lerp(blended, dilated, dilated_blend)
+                blended = _apply_dilated_blend(
+                    original=blended,
+                    dilated=dilated,
+                    blend=dilated_blend,
+                    method=dilated_blend_method,
+                    downscale_factor=max(1.0, float(dilated_downscale)),
+                )
                 _log_channel_stats(f"{stage_label} dilated/merged", blended)
             else:
                 # Free refined_dict when dilated sampling is skipped
@@ -1439,6 +1712,12 @@ class FlowMatchingStage:
                     "max": 1.0,
                     "step": 0.01,
                 }),
+                "dilated_blend_method": (_DILATED_BLEND_METHODS, {
+                    "default": "frequency",
+                    "tooltip": "Blending method for dilated refinement. 'frequency' (FFT-based, recommended), "
+                               "'laplacian' (multi-scale pyramid), 'gaussian' (smoothed difference), "
+                               "or 'linear' (simple lerp, may cause grid artifacts).",
+                }),
             },
         }
 
@@ -1462,6 +1741,7 @@ class FlowMatchingStage:
         reduce_memory_use="enable",
         dilated_downscale=2.0,
         dilated_blend=0.25,
+        dilated_blend_method="frequency",
     ):
         skip_blend = max(0.0, min(1.0, skip_blend))
         reduce_memory_flag = reduce_memory_use == "enable"
@@ -1488,6 +1768,7 @@ class FlowMatchingStage:
                     reduce_memory_flag=reduce_memory_flag,
                     dilated_downscale=dilated_downscale,
                     dilated_blend=dilated_blend,
+                    dilated_blend_method=dilated_blend_method,
                     streaming_enabled=streaming_enabled,
                 )
             except BaseException as exc:
@@ -1521,6 +1802,7 @@ class FlowMatchingStage:
         reduce_memory_flag: bool,
         dilated_downscale,
         dilated_blend,
+        dilated_blend_method,
         streaming_enabled: bool,
     ):
         current_latent_dict = latent.copy()
@@ -1628,13 +1910,20 @@ class FlowMatchingStage:
                         base_latent=blended_dict,
                         downscale_factor=max(1.0, float(dilated_downscale)),
                         blend=dilated_blend,
+                        blend_method=dilated_blend_method,
                     ),
                     attention_budget_mb=attention_budget,
                     enable_low_vram=low_vram,
                 ),
                 description="stage dilated refinement" + (" (streaming fallback)" if streaming_enabled else ""),
             )
-            blended = torch.lerp(blended, dilated, dilated_blend)
+            blended = _apply_dilated_blend(
+                original=blended,
+                dilated=dilated,
+                blend=dilated_blend,
+                method=dilated_blend_method,
+                downscale_factor=max(1.0, float(dilated_downscale)),
+            )
         else:
             # Free refined_dict when dilated sampling is skipped
             del refined_dict

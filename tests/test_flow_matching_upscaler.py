@@ -658,3 +658,161 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
         self.assertEqual(image_tensor.shape[3], 3)
         self.assertTrue(torch.all(image_tensor >= 0.0))
         self.assertTrue(torch.all(image_tensor <= 1.0))
+
+
+class DilatedBlendMethodTests(unittest.TestCase):
+    """Tests for the dilated sampling blend methods."""
+
+    def setUp(self):
+        # Create test tensors
+        self.original = torch.randn(1, 4, 32, 32, dtype=torch.float32)
+        self.dilated = torch.randn(1, 4, 32, 32, dtype=torch.float32)
+        self.downscale_factor = 2.0
+
+    def test_linear_blend_is_torch_lerp(self):
+        """Verify linear blend matches torch.lerp."""
+        blend = 0.5
+        result = fm_upscaler._apply_dilated_blend(
+            original=self.original,
+            dilated=self.dilated,
+            blend=blend,
+            method="linear",
+            downscale_factor=self.downscale_factor,
+        )
+        expected = torch.lerp(self.original, self.dilated, blend)
+        self.assertTrue(torch.allclose(result, expected))
+
+    def test_frequency_blend_preserves_shape(self):
+        """Verify frequency blend returns correct shape."""
+        result = fm_upscaler._frequency_blend(
+            self.original, self.dilated, blend=0.5, downscale_factor=self.downscale_factor
+        )
+        self.assertEqual(result.shape, self.original.shape)
+        self.assertEqual(result.dtype, self.original.dtype)
+
+    def test_frequency_blend_zero_returns_original(self):
+        """Verify frequency blend with blend=0 returns original."""
+        result = fm_upscaler._frequency_blend(
+            self.original, self.dilated, blend=0.0, downscale_factor=self.downscale_factor
+        )
+        self.assertTrue(torch.equal(result, self.original))
+
+    def test_frequency_blend_one_returns_dilated(self):
+        """Verify frequency blend with blend=1 returns dilated."""
+        result = fm_upscaler._frequency_blend(
+            self.original, self.dilated, blend=1.0, downscale_factor=self.downscale_factor
+        )
+        self.assertTrue(torch.equal(result, self.dilated))
+
+    def test_laplacian_blend_preserves_shape(self):
+        """Verify Laplacian pyramid blend returns correct shape."""
+        result = fm_upscaler._laplacian_pyramid_blend(
+            self.original, self.dilated, blend=0.5
+        )
+        self.assertEqual(result.shape, self.original.shape)
+
+    def test_laplacian_blend_zero_returns_original(self):
+        """Verify Laplacian blend with blend=0 returns original."""
+        result = fm_upscaler._laplacian_pyramid_blend(
+            self.original, self.dilated, blend=0.0
+        )
+        self.assertTrue(torch.equal(result, self.original))
+
+    def test_laplacian_blend_one_returns_dilated(self):
+        """Verify Laplacian blend with blend=1 returns dilated."""
+        result = fm_upscaler._laplacian_pyramid_blend(
+            self.original, self.dilated, blend=1.0
+        )
+        self.assertTrue(torch.equal(result, self.dilated))
+
+    def test_laplacian_blend_small_image_fallback(self):
+        """Verify Laplacian blend falls back to linear for small images."""
+        small_orig = torch.randn(1, 4, 4, 4, dtype=torch.float32)
+        small_dilated = torch.randn(1, 4, 4, 4, dtype=torch.float32)
+        result = fm_upscaler._laplacian_pyramid_blend(
+            small_orig, small_dilated, blend=0.5
+        )
+        self.assertEqual(result.shape, small_orig.shape)
+
+    def test_gaussian_blend_preserves_shape(self):
+        """Verify Gaussian-weighted blend returns correct shape."""
+        result = fm_upscaler._gaussian_weighted_blend(
+            self.original, self.dilated, blend=0.5, blur_sigma=2.0
+        )
+        self.assertEqual(result.shape, self.original.shape)
+
+    def test_gaussian_blend_zero_returns_original(self):
+        """Verify Gaussian blend with blend=0 returns original."""
+        result = fm_upscaler._gaussian_weighted_blend(
+            self.original, self.dilated, blend=0.0, blur_sigma=2.0
+        )
+        self.assertTrue(torch.equal(result, self.original))
+
+    def test_gaussian_blend_smooths_difference(self):
+        """Verify Gaussian blend produces smoothed result."""
+        # Use a pattern that would show grid artifacts without smoothing
+        grid_dilated = self.original.clone()
+        grid_dilated[:, :, ::2, ::2] += 1.0  # Grid pattern
+
+        result = fm_upscaler._gaussian_weighted_blend(
+            self.original, grid_dilated, blend=0.5, blur_sigma=2.0
+        )
+        # Result should be different from both inputs
+        self.assertFalse(torch.equal(result, self.original))
+        self.assertFalse(torch.equal(result, grid_dilated))
+
+    def test_apply_dilated_blend_unknown_method_fallback(self):
+        """Verify unknown method falls back to linear."""
+        result = fm_upscaler._apply_dilated_blend(
+            original=self.original,
+            dilated=self.dilated,
+            blend=0.5,
+            method="unknown_method",
+            downscale_factor=self.downscale_factor,
+        )
+        expected = torch.lerp(self.original, self.dilated, 0.5)
+        self.assertTrue(torch.allclose(result, expected))
+
+    def test_all_blend_methods_produce_valid_output(self):
+        """Verify all blend methods produce valid (non-NaN, non-Inf) output."""
+        for method in fm_upscaler._DILATED_BLEND_METHODS:
+            with self.subTest(method=method):
+                result = fm_upscaler._apply_dilated_blend(
+                    original=self.original,
+                    dilated=self.dilated,
+                    blend=0.5,
+                    method=method,
+                    downscale_factor=self.downscale_factor,
+                )
+                self.assertFalse(torch.any(torch.isnan(result)), f"{method} produced NaN")
+                self.assertFalse(torch.any(torch.isinf(result)), f"{method} produced Inf")
+
+    def test_dilated_refinement_accepts_blend_method(self):
+        """Verify dilated_refinement can be called with blend_method parameter."""
+        latent = {"samples": torch.ones((1, 4, 16, 16), dtype=torch.float32)}
+
+        def fake_common_ksampler(**kwargs):
+            latent_payload = kwargs["latent"]
+            result = latent_payload.copy()
+            result["samples"] = torch.zeros_like(latent_payload["samples"])
+            return (result,)
+
+        with mock.patch.object(fm_upscaler, "common_ksampler", new=fake_common_ksampler):
+            for method in fm_upscaler._DILATED_BLEND_METHODS:
+                with self.subTest(method=method):
+                    result = fm_upscaler.dilated_refinement(
+                        model=object(),
+                        positive=[],
+                        negative=[],
+                        sampler_name="test_sampler",
+                        scheduler="test_scheduler",
+                        cfg=1.0,
+                        steps=2,
+                        seed=42,
+                        denoise=1.0,
+                        base_latent=latent.copy(),
+                        downscale_factor=2.0,
+                        blend=0.5,
+                        blend_method=method,
+                    )
+                    self.assertEqual(result.shape, latent["samples"].shape)
