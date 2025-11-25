@@ -1463,7 +1463,8 @@ class FlowMatchingProgressiveUpscaler:
                 del refined_dict
                 blended_dict["samples"] = blended
                 _log_channel_stats(f"{stage_label} dilated/base", blended)
-                dilated = _run_with_oom_retry(
+                # dilated_refinement already applies the blend internally, so we use its result directly
+                blended = _run_with_oom_retry(
                     lambda: dilated_refinement(
                         model=model,
                         positive=positive,
@@ -1481,13 +1482,6 @@ class FlowMatchingProgressiveUpscaler:
                         use_same_seed=dilated_seed_mode == "same",
                     ),
                     description=f"{stage_label} dilated refinement",
-                )
-                _log_channel_stats(f"{stage_label} dilated/result", dilated)
-                blended = _apply_dilated_blend(
-                    original=blended,
-                    dilated=dilated,
-                    blend=dilated_blend,
-                    downscale_factor=max(1.0, float(dilated_downscale)),
                 )
                 _log_channel_stats(f"{stage_label} dilated/merged", blended)
             else:
@@ -1787,7 +1781,8 @@ class FlowMatchingStage:
             # Free refined_dict now that blended_dict has been created
             del refined_dict
             blended_dict["samples"] = blended
-            dilated = _run_with_oom_retry(
+            # dilated_refinement already applies the blend internally, so we use its result directly
+            blended = _run_with_oom_retry(
                 lambda: _execute_with_memory_controls(
                     lambda: dilated_refinement(
                         model=model,
@@ -1809,12 +1804,6 @@ class FlowMatchingStage:
                     enable_low_vram=low_vram,
                 ),
                 description="stage dilated refinement" + (" (streaming fallback)" if streaming_enabled else ""),
-            )
-            blended = _apply_dilated_blend(
-                original=blended,
-                dilated=dilated,
-                blend=dilated_blend,
-                downscale_factor=max(1.0, float(dilated_downscale)),
             )
         else:
             # Free refined_dict when dilated sampling is skipped
