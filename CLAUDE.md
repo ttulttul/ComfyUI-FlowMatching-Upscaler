@@ -98,6 +98,22 @@ pytest tests/test_flow_matching_upscaler.py -v
 **Important Constants:**
 - `_SEED_STRIDE = 0x9E3779B97F4A7C15` - Golden ratio for seed perturbation
 - `_STREAMING_ATTENTION_BUDGET_MB = 256.0` - Memory budget for fallback mode
+- `_DILATED_BLEND_METHODS` - Tuple of available blending methods
+
+**Dilated Blending Methods:**
+
+The `dilated_blend_method` parameter controls how the dilated (low-pass) result is blended with the original latent:
+
+- `frequency` (default, recommended) - FFT-based blending that cleanly separates frequency bands. Takes low frequencies from the dilated result and high frequencies from the original. Best for avoiding grid artifacts.
+- `laplacian` - Multi-scale Laplacian pyramid blending. Coarse levels get more dilated influence, fine levels get less. Good for seamless compositing.
+- `gaussian` - Gaussian-smoothed difference blending. Applies blur to the difference before adding, smoothing out grid artifacts.
+- `linear` - Simple `torch.lerp` interpolation. Original behavior, may cause grid artifacts at high blend ratios.
+
+**Key Blending Functions:**
+- `_frequency_blend()` - FFT-based frequency domain blending
+- `_laplacian_pyramid_blend()` - Multi-scale pyramid blending
+- `_gaussian_weighted_blend()` - Gaussian-smoothed blending
+- `_apply_dilated_blend()` - Dispatcher for all blend methods
 
 ### DyPE Implementation (`qwen_spatial.py`, `dype_qwen_image.py`)
 
