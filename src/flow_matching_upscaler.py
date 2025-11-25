@@ -1281,6 +1281,14 @@ class FlowMatchingProgressiveUpscaler:
                     "default": "derive",
                     "tooltip": "Seed mode for dilated sampling. 'derive' adds 10,000 to base seed, 'same' uses identical seed.",
                 }),
+                "dilated_denoise": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "round": 0.01,
+                    "tooltip": "Denoising strength for dilated sampling. Lower values preserve more spatial structure from the original.",
+                }),
                 "cleanup_stage": (["disable", "enable"], {
                     "default": "disable",
                     "tooltip": "Run an extra non-scaling clean-up denoise pass at the end.",
@@ -1329,6 +1337,7 @@ class FlowMatchingProgressiveUpscaler:
         dilated_blend=0.25,
         dilated_min_steps=1,
         dilated_seed_mode="derive",
+        dilated_denoise=0.5,
         cleanup_stage="disable",
         cleanup_noise=0.0,
         cleanup_denoise=0.4,
@@ -1498,6 +1507,7 @@ class FlowMatchingProgressiveUpscaler:
                         blend=dilated_blend,
                         min_steps=max(1, int(dilated_min_steps)),
                         use_same_seed=dilated_seed_mode == "same",
+                        dilated_denoise=dilated_denoise,
                     ),
                     description=f"{stage_label} dilated refinement",
                 )
@@ -1619,6 +1629,14 @@ class FlowMatchingStage:
                     "default": "derive",
                     "tooltip": "Seed mode for dilated sampling. 'derive' adds 10,000 to base seed, 'same' uses identical seed.",
                 }),
+                "dilated_denoise": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "round": 0.01,
+                    "tooltip": "Denoising strength for dilated sampling. Lower values preserve more spatial structure from the original.",
+                }),
             },
         }
 
@@ -1644,6 +1662,7 @@ class FlowMatchingStage:
         dilated_blend=0.25,
         dilated_min_steps=1,
         dilated_seed_mode="derive",
+        dilated_denoise=0.5,
     ):
         skip_blend = max(0.0, min(1.0, skip_blend))
         reduce_memory_flag = reduce_memory_use == "enable"
@@ -1672,6 +1691,7 @@ class FlowMatchingStage:
                     dilated_blend=dilated_blend,
                     dilated_min_steps=dilated_min_steps,
                     dilated_seed_mode=dilated_seed_mode,
+                    dilated_denoise=dilated_denoise,
                     streaming_enabled=streaming_enabled,
                 )
             except BaseException as exc:
@@ -1707,6 +1727,7 @@ class FlowMatchingStage:
         dilated_blend,
         dilated_min_steps,
         dilated_seed_mode,
+        dilated_denoise,
         streaming_enabled: bool,
     ):
         current_latent_dict = latent.copy()
@@ -1817,6 +1838,7 @@ class FlowMatchingStage:
                         blend=dilated_blend,
                         min_steps=max(1, int(dilated_min_steps)),
                         use_same_seed=dilated_seed_mode == "same",
+                        dilated_denoise=dilated_denoise,
                     ),
                     attention_budget_mb=attention_budget,
                     enable_low_vram=low_vram,
