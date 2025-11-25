@@ -76,6 +76,7 @@ def _ensure_comfy_stubs() -> None:
             def __init__(self):
                 self.model = _StubModelWrapper()
                 self._wrapper = None
+                self._object_patches = {}
 
             def clone(self):
                 cloned = _StubModelPatcher()
@@ -83,8 +84,13 @@ def _ensure_comfy_stubs() -> None:
                 return cloned
 
             def add_object_patch(self, path: str, obj) -> None:
+                self._object_patches[path] = obj
                 if path == "diffusion_model.pe_embedder":
                     self.model.diffusion_model.pe_embedder = obj
+                elif path == "model_sampling":
+                    # Store the wrapper but don't replace the actual model_sampling
+                    # so tests can verify the wrapper was installed
+                    pass
 
             def set_model_unet_function_wrapper(self, wrapper) -> None:
                 self._wrapper = wrapper
@@ -229,7 +235,10 @@ def test_apply_dype_to_qwen_image_installs_embedder_and_wrapper():
     embedder = patched.model.diffusion_model.pe_embedder
     assert isinstance(embedder, qwen_spatial.QwenSpatialPosEmbed)
     assert hasattr(patched, "_wrapper") and patched._wrapper is not None
-    assert patched.model.model_sampling._dype_patched is True
+    # Verify that model_sampling wrapper was installed via add_object_patch
+    assert "model_sampling" in patched._object_patches
+    wrapper = patched._object_patches["model_sampling"]
+    assert isinstance(wrapper, qwen_spatial._DyPEModelSampling)
 
     args_dict = {
         "input": torch.randn(1),
@@ -284,7 +293,6 @@ def test_apply_dype_to_qwen_image_patches_fallback_sampler():
     class _FallbackSampler:
         def __init__(self):
             self.sigma_max = 2.0
-            self._dype_patched = False
 
         def sigma(self, timestep):
             return timestep * 2.0
@@ -308,10 +316,67 @@ def test_apply_dype_to_qwen_image_patches_fallback_sampler():
         editing_mode="full",
     )
 
-    assert fallback_sampler._dype_patched is True
-    adjusted_sigma = fallback_sampler.sigma(0.5)
+    # Verify wrapper was installed via add_object_patch
+    assert "model_sampling" in patched._object_patches
+    wrapper = patched._object_patches["model_sampling"]
+    assert isinstance(wrapper, qwen_spatial._DyPEModelSampling)
+    # Wrapper should delegate to the original sampler and apply scaling
+    adjusted_sigma = wrapper.sigma(0.5)
     assert adjusted_sigma > 0.5
+    # Verify original sampler is not mutated
+    assert fallback_sampler.sigma(0.5) == 1.0  # Original: 0.5 * 2.0 = 1.0
     assert isinstance(patched.model.diffusion_model.pe_embedder, qwen_spatial.QwenSpatialPosEmbed)
+
+
+def test_dype_model_sampling_wrapper_delegates_attributes():
+    """Test that _DyPEModelSampling delegates non-sigma attributes to wrapped sampler."""
+
+    class _MockSampler:
+        def __init__(self):
+            self.sigma_max = 10.0
+            self.custom_attr = "test_value"
+
+        def sigma(self, timestep):
+            return timestep * 2.0
+
+        def other_method(self):
+            return "other_result"
+
+    mock_sampler = _MockSampler()
+    wrapper = qwen_spatial._DyPEModelSampling(mock_sampler, dype_shift=1.5, is_flux=False)
+
+    # Test attribute delegation
+    assert wrapper.sigma_max == 10.0
+    assert wrapper.custom_attr == "test_value"
+    assert wrapper.other_method() == "other_result"
+
+    # Test sigma override (non-flux fallback)
+    result = wrapper.sigma(0.5)
+    # Fallback: baseline * (1.0 + dype_shift * 0.1) = 1.0 * (1.0 + 1.5 * 0.1) = 1.15
+    assert result == 1.0 * (1.0 + 1.5 * 0.1)
+
+    # Verify original sampler is unchanged
+    assert mock_sampler.sigma(0.5) == 1.0
+
+
+def test_dype_model_sampling_wrapper_flux_mode():
+    """Test that _DyPEModelSampling uses flux_time_shift when is_flux=True."""
+    from comfy import model_sampling
+
+    class _MockFluxSampler:
+        def __init__(self):
+            self.sigma_max = 1.0
+
+        def sigma(self, timestep):
+            return timestep
+
+    mock_sampler = _MockFluxSampler()
+    wrapper = qwen_spatial._DyPEModelSampling(mock_sampler, dype_shift=1.2, is_flux=True)
+
+    # In flux mode, sigma should use flux_time_shift
+    result = wrapper.sigma(0.5)
+    expected = model_sampling.flux_time_shift(1.2, 1.0, 0.5)
+    assert result == expected
 
 
 def test_dype_qwen_image_node_executes_and_logs(caplog: pytest.LogCaptureFixture):
