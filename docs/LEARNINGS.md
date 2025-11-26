@@ -57,3 +57,6 @@
 - Collapsing dilated refinement onto the FFT-based frequency blend removed the
   method selector surface area—our tests now focus on validating that helper and the
   multi-frame lerp fallback instead of juggling several legacy modes.
+- Comfy's runtime enforces that `model_sampling` children are `nn.Module` instances,
+  so our DyPE wrapper now subclasses `torch.nn.Module` to satisfy `ModelPatcher` and
+  GPU loading without mutating the wrapped sampler.

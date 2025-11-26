@@ -96,7 +96,7 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-class _DyPEModelSampling:
+class _DyPEModelSampling(nn.Module):
     """
     Wrapper that provides DyPE-adjusted sigma without mutating the original sampler.
 
@@ -106,6 +106,9 @@ class _DyPEModelSampling:
     """
 
     def __init__(self, wrapped_sampler, dype_shift: float, is_flux: bool):
+        super().__init__()
+        if isinstance(wrapped_sampler, nn.Module):
+            self.add_module("_wrapped_module", wrapped_sampler)
         # Store reference to wrapped sampler and config
         object.__setattr__(self, "_wrapped", wrapped_sampler)
         object.__setattr__(self, "_dype_shift", dype_shift)
@@ -124,15 +127,10 @@ class _DyPEModelSampling:
                 return float(baseline) * scale
 
     def __getattr__(self, name: str):
+        if name in {"_wrapped", "_dype_shift", "_is_flux"}:
+            return object.__getattribute__(self, name)
         # Delegate all other attribute access to wrapped sampler
         return getattr(self._wrapped, name)
-
-    def __setattr__(self, name: str, value):
-        # Prevent accidental mutation; delegate to wrapped if needed
-        if name in ("_wrapped", "_dype_shift", "_is_flux"):
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._wrapped, name, value)
 
 
 class QwenSpatialPosEmbed(nn.Module):
