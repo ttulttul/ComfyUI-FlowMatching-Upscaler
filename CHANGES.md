@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.6 - 2025-12-17
+- Added Image Mesh Drag node to apply the same cloth-like warp directly to IMAGE tensors.
+
 ## 1.0.5 - 2025-12-17
 - Added Latent Mesh Drag node for cloth-like latent-space spatial warps.
 - Added deterministic mesh-warp tests (including noise-mask lockstep coverage).

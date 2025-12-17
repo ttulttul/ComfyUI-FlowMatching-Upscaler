@@ -18,9 +18,9 @@ high-resolution generation.
     spatial rotary embeddings. It allows the diffusion model to stay coherent
     far beyond its native training resolution by applying Dynamic Position
     Extrapolation (DyPE).
-3.  **Latent Mesh Drag:** A latent-space perturbation node that drags random
-    mesh vertices to create cloth-like spatial warps while keeping the overall
-    image recognizable.
+3.  **Mesh Drag (Latent / Image):** Spatial perturbation nodes that drag random
+    mesh vertices to create cloth-like warps while keeping the overall content
+    recognizable.
 
 ## Installation
 
@@ -189,7 +189,7 @@ The `method` parameter determines the math used to handle coordinates outside th
 
 ---
 
-## Part 3: Latent Mesh Drag
+## Part 3: Mesh Drag
 
 `Latent Mesh Drag` applies a cloth-like deformation directly to a `LATENT` by
 randomly dragging a subset of vertices on a coarse mesh and smoothly
@@ -206,6 +206,22 @@ Drag distances are specified in **latent pixels** (multiply by ~8 for image-spac
 | `points` | INT | `12` | Number of mesh vertices to drag. |
 | `drag_min` | FLOAT | `0.0` | Minimum drag distance (latent pixels). |
 | `drag_max` | FLOAT | `4.0` | Maximum drag distance (latent pixels). |
+
+---
+
+`Image Mesh Drag` applies the same deformation in image space and accepts ComfyUI `IMAGE` tensors.
+
+Drag distances are specified in **image pixels**.
+
+### Node Parameters: Image Mesh Drag
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `image` | IMAGE | – | Image to warp. |
+| `seed` | INT | `0` | Controls vertex selection and drag vectors. |
+| `points` | INT | `12` | Number of mesh vertices to drag. |
+| `drag_min` | FLOAT | `0.0` | Minimum drag distance (image pixels). |
+| `drag_max` | FLOAT | `32.0` | Maximum drag distance (image pixels). |
 
 ---
 

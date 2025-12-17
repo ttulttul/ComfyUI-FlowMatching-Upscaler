@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 _SEED_STRIDE = 0x9E3779B97F4A7C15  # 64-bit golden ratio constant
 _DEFAULT_VERTEX_SPACING = 16  # Latent pixels between control vertices.
+_DEFAULT_IMAGE_VERTEX_SPACING = _DEFAULT_VERTEX_SPACING * 8  # Approx SD-style VAE scale factor.
 
 
 @dataclass(frozen=True)
@@ -140,12 +141,13 @@ def mesh_drag_warp(
     drag_max: float,
     seed: int,
     padding_mode: str = "border",
+    vertex_spacing: int = _DEFAULT_VERTEX_SPACING,
 ) -> torch.Tensor:
     """
     Warp a latent-like tensor by perturbing random vertices on a coarse mesh and interpolating
     the displacement across the image.
 
-    Drag amounts are specified in latent pixels (not image pixels).
+    Drag amounts are specified in pixels of the input tensor's spatial dimensions.
     """
     if not isinstance(tensor, torch.Tensor):
         raise TypeError(f"Expected torch.Tensor, got {type(tensor)}")
@@ -169,7 +171,7 @@ def mesh_drag_warp(
     nchw = flattened.tensor
     device = nchw.device
 
-    grid_h, grid_w = _compute_vertex_grid_size(height, width, points)
+    grid_h, grid_w = _compute_vertex_grid_size(height, width, points, spacing=int(vertex_spacing))
     control = torch.stack(
         [
             _make_control_displacement(
@@ -216,6 +218,71 @@ def mesh_drag_warp(
             align_corners=True,
         )
         return flattened.restore(warped)
+
+
+def mesh_drag_warp_image(
+    image: torch.Tensor,
+    *,
+    points: int,
+    drag_min: float,
+    drag_max: float,
+    seed: int,
+    padding_mode: str = "border",
+    vertex_spacing: int = _DEFAULT_IMAGE_VERTEX_SPACING,
+) -> torch.Tensor:
+    """
+    Warp an image tensor using the same mesh drag logic.
+
+    Accepts ComfyUI's `IMAGE` format (B,H,W,C) as well as NCHW inputs.
+    Drag amounts are in image pixels.
+    """
+    if not isinstance(image, torch.Tensor):
+        raise TypeError(f"Expected torch.Tensor, got {type(image)}")
+
+    if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
+        warped = mesh_drag_warp_image(
+            image.unsqueeze(0),
+            points=points,
+            drag_min=drag_min,
+            drag_max=drag_max,
+            seed=seed,
+            padding_mode=padding_mode,
+            vertex_spacing=vertex_spacing,
+        )
+        return warped.squeeze(0)
+
+    if image.ndim != 4:
+        raise ValueError(f"Expected image tensor with shape (B,H,W,C) or (B,C,H,W), got {tuple(image.shape)}")
+
+    if image.shape[-1] in (1, 3, 4):
+        nchw = image.permute(0, 3, 1, 2)
+        warped_nchw = mesh_drag_warp(
+            nchw,
+            points=points,
+            drag_min=drag_min,
+            drag_max=drag_max,
+            seed=seed,
+            padding_mode=padding_mode,
+            vertex_spacing=vertex_spacing,
+        )
+        return warped_nchw.permute(0, 2, 3, 1)
+
+    if image.shape[1] in (1, 3, 4):
+        return mesh_drag_warp(
+            image,
+            points=points,
+            drag_min=drag_min,
+            drag_max=drag_max,
+            seed=seed,
+            padding_mode=padding_mode,
+            vertex_spacing=vertex_spacing,
+        )
+
+    raise ValueError(
+        "Unable to infer channel axis for image tensor. Expected channels-last (B,H,W,C) "
+        "or channels-first (B,C,H,W) with C in {1,3,4}, got shape "
+        f"{tuple(image.shape)}."
+    )
 
 
 class LatentMeshDrag:
@@ -298,11 +365,83 @@ class LatentMeshDrag:
         return (output,)
 
 
+class ImageMeshDrag:
+    """
+    Applies a cloth-like mesh warp to an image tensor by randomly dragging a subset of control vertices.
+
+    This node operates directly in image space (pixel units) and accepts ComfyUI's BHWC `IMAGE` tensors.
+    """
+
+    CATEGORY = "image/perturb"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "drag"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Dict[str, tuple]]:
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image to warp spatially using a random mesh drag."}),
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xFFFFFFFFFFFFFFFF,
+                    "tooltip": "Seed controlling which mesh points are dragged and by how much.",
+                }),
+                "points": ("INT", {
+                    "default": 12,
+                    "min": 0,
+                    "max": 4096,
+                    "tooltip": "Number of mesh vertices to randomly drag.",
+                }),
+                "drag_min": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 4096.0,
+                    "step": 1.0,
+                    "round": 0.01,
+                    "tooltip": "Minimum drag distance (image pixels).",
+                }),
+                "drag_max": ("FLOAT", {
+                    "default": 32.0,
+                    "min": 0.0,
+                    "max": 4096.0,
+                    "step": 1.0,
+                    "round": 0.01,
+                    "tooltip": "Maximum drag distance (image pixels).",
+                }),
+            },
+        }
+
+    def drag(self, image, seed: int, points: int, drag_min: float, drag_max: float):
+        if not isinstance(image, torch.Tensor):
+            raise ValueError(f"IMAGE input must be a torch.Tensor, got {type(image)}.")
+
+        logger.debug(
+            "Applying ImageMeshDrag: image=%s points=%d drag=[%.3f, %.3f] seed=%d",
+            tuple(image.shape),
+            points,
+            drag_min,
+            drag_max,
+            seed,
+        )
+
+        warped = mesh_drag_warp_image(
+            image,
+            points=int(points),
+            drag_min=float(drag_min),
+            drag_max=float(drag_max),
+            seed=int(seed),
+        )
+        return (warped,)
+
+
 NODE_CLASS_MAPPINGS = {
     "LatentMeshDrag": LatentMeshDrag,
+    "ImageMeshDrag": ImageMeshDrag,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentMeshDrag": "Latent Mesh Drag",
+    "ImageMeshDrag": "Image Mesh Drag",
 }
-

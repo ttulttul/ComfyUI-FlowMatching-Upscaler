@@ -64,3 +64,6 @@
   vertices on a coarse 2D mesh, upsampling the resulting displacement field, and
   applying it with `torch.nn.functional.grid_sample` so the warp stays smooth while
   remaining deterministic via per-batch seeded vertex selection.
+- Extending the same warp to ComfyUI `IMAGE` tensors mainly requires handling BHWC
+  vs NCHW layouts; keeping the mesh resolution coarse (and drag distances larger)
+  helps preserve the "fabric" feel at full image resolutions.
