@@ -32,6 +32,32 @@ def test_mesh_drag_warp_deterministic_for_seed():
     assert torch.allclose(out1, out2)
 
 
+def test_mesh_drag_warp_supports_bspline_interpolation():
+    base = torch.linspace(0.0, 1.0, 48 * 48, dtype=torch.float32).reshape(1, 1, 48, 48)
+    tensor = base.repeat(1, 4, 1, 1)
+
+    out_bicubic = mesh_drag_warp(
+        tensor,
+        points=12,
+        drag_min=1.0,
+        drag_max=6.0,
+        seed=123,
+        displacement_interpolation="bicubic",
+        sampling_interpolation="bilinear",
+    )
+    out_bspline = mesh_drag_warp(
+        tensor,
+        points=12,
+        drag_min=1.0,
+        drag_max=6.0,
+        seed=123,
+        displacement_interpolation="bspline",
+        spline_passes=2,
+        sampling_interpolation="bilinear",
+    )
+    assert not torch.allclose(out_bicubic, out_bspline)
+
+
 def test_mesh_drag_warp_changes_tensor_for_nonzero_drag():
     base = torch.arange(0, 32 * 32, dtype=torch.float32).reshape(1, 1, 32, 32)
     tensor = base.repeat(1, 4, 1, 1)
@@ -81,6 +107,15 @@ def test_mesh_drag_warp_image_deterministic_for_seed():
 def test_image_mesh_drag_node_preserves_shape_and_changes_content():
     image = torch.linspace(0.0, 1.0, 64 * 64, dtype=torch.float32).reshape(1, 64, 64, 1).repeat(1, 1, 1, 3)
     node = ImageMeshDrag()
-    (out_image,) = node.drag(image, seed=123, points=10, drag_min=8.0, drag_max=48.0)
+    (out_image,) = node.drag(
+        image,
+        seed=123,
+        points=10,
+        drag_min=8.0,
+        drag_max=48.0,
+        displacement_interpolation="bspline",
+        spline_passes=2,
+        sampling_interpolation="bicubic",
+    )
     assert out_image.shape == image.shape
     assert not torch.allclose(out_image, image)

@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.7 - 2025-12-17
+- Added selectable mesh-drag interpolation options, including a B-spline-smoothed displacement mode for more organic warps.
+
 ## 1.0.6 - 2025-12-17
 - Added Image Mesh Drag node to apply the same cloth-like warp directly to IMAGE tensors.
 

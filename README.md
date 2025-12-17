@@ -206,6 +206,9 @@ Drag distances are specified in **latent pixels** (multiply by ~8 for image-spac
 | `points` | INT | `12` | Number of mesh vertices to drag. |
 | `drag_min` | FLOAT | `0.0` | Minimum drag distance (latent pixels). |
 | `drag_max` | FLOAT | `4.0` | Maximum drag distance (latent pixels). |
+| `displacement_interpolation` | enum | `bicubic` | Interpolation used to expand the mesh drags into a displacement field (`bspline` is smoother). |
+| `spline_passes` | INT | `2` | B-spline smoothing passes (only used when `displacement_interpolation = bspline`). |
+| `sampling_interpolation` | enum | `bilinear` | Interpolation used while sampling the source latent during the warp. |
 
 ---
 
@@ -222,6 +225,9 @@ Drag distances are specified in **image pixels**.
 | `points` | INT | `12` | Number of mesh vertices to drag. |
 | `drag_min` | FLOAT | `0.0` | Minimum drag distance (image pixels). |
 | `drag_max` | FLOAT | `32.0` | Maximum drag distance (image pixels). |
+| `displacement_interpolation` | enum | `bicubic` | Interpolation used to expand the mesh drags into a displacement field (`bspline` is smoother). |
+| `spline_passes` | INT | `2` | B-spline smoothing passes (only used when `displacement_interpolation = bspline`). |
+| `sampling_interpolation` | enum | `bilinear` | Interpolation used while sampling the source image during the warp. |
 
 ---
 

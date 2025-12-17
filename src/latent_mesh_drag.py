@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 _SEED_STRIDE = 0x9E3779B97F4A7C15  # 64-bit golden ratio constant
 _DEFAULT_VERTEX_SPACING = 16  # Latent pixels between control vertices.
 _DEFAULT_IMAGE_VERTEX_SPACING = _DEFAULT_VERTEX_SPACING * 8  # Approx SD-style VAE scale factor.
+_DISPLACEMENT_INTERPOLATION_MODES = ("bilinear", "bicubic", "bspline", "nearest")
+_SAMPLING_INTERPOLATION_MODES = ("bilinear", "bicubic", "nearest")
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,58 @@ def _base_grid(height: int, width: int, *, device: torch.device) -> torch.Tensor
     grid = torch.stack((grid_x, grid_y), dim=-1)
     return grid.unsqueeze(0)
 
+def _apply_bspline_smoothing(displacement: torch.Tensor, *, passes: int = 1) -> torch.Tensor:
+    if passes <= 0:
+        return displacement
+    if displacement.ndim != 4:
+        raise ValueError(f"Expected displacement tensor with shape (B,2,H,W), got {tuple(displacement.shape)}")
+
+    channels = int(displacement.shape[1])
+    if channels != 2:
+        raise ValueError(f"Expected displacement to have 2 channels (dx,dy), got {channels}")
+
+    device = displacement.device
+    dtype = displacement.dtype
+
+    kernel_1d = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0], device=device, dtype=dtype) / 16.0
+    kernel_2d = torch.outer(kernel_1d, kernel_1d)
+    weight = kernel_2d.expand(channels, 1, 5, 5).contiguous()
+
+    smoothed = displacement
+    for _ in range(int(passes)):
+        smoothed = F.conv2d(smoothed, weight, padding=2, groups=channels)
+    return smoothed
+
+
+def _upsample_displacement(
+    control: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    mode: str,
+    spline_passes: int,
+) -> torch.Tensor:
+    mode = str(mode).strip().lower()
+    if mode not in _DISPLACEMENT_INTERPOLATION_MODES:
+        raise ValueError(f"Unsupported displacement_interpolation '{mode}'. Supported: {_DISPLACEMENT_INTERPOLATION_MODES}")
+
+    if mode == "bspline":
+        base = F.interpolate(
+            control,
+            size=(height, width),
+            mode="bicubic",
+            align_corners=True,
+        )
+        return _apply_bspline_smoothing(base, passes=int(spline_passes))
+
+    align_corners = True if mode in ("bilinear", "bicubic") else None
+    return F.interpolate(
+        control,
+        size=(height, width),
+        mode=mode,
+        align_corners=align_corners,
+    )
+
 
 def mesh_drag_warp(
     tensor: torch.Tensor,
@@ -142,6 +196,9 @@ def mesh_drag_warp(
     seed: int,
     padding_mode: str = "border",
     vertex_spacing: int = _DEFAULT_VERTEX_SPACING,
+    displacement_interpolation: str = "bicubic",
+    spline_passes: int = 2,
+    sampling_interpolation: str = "bilinear",
 ) -> torch.Tensor:
     """
     Warp a latent-like tensor by perturbing random vertices on a coarse mesh and interpolating
@@ -166,6 +223,9 @@ def mesh_drag_warp(
         return tensor
     if points == 0 or drag_max <= 0.0:
         return tensor
+    sampling_interpolation = str(sampling_interpolation).strip().lower()
+    if sampling_interpolation not in _SAMPLING_INTERPOLATION_MODES:
+        raise ValueError(f"Unsupported sampling_interpolation '{sampling_interpolation}'. Supported: {_SAMPLING_INTERPOLATION_MODES}")
 
     flattened = _flatten_to_nchw(tensor)
     nchw = flattened.tensor
@@ -188,11 +248,12 @@ def mesh_drag_warp(
     ).to(device=device)
 
     with torch.no_grad():
-        disp = F.interpolate(
+        disp = _upsample_displacement(
             control,
-            size=(height, width),
-            mode="bicubic",
-            align_corners=True,
+            height=height,
+            width=width,
+            mode=displacement_interpolation,
+            spline_passes=int(spline_passes),
         )
         if drag_max > 0.0:
             disp = disp.clamp(min=-float(drag_max), max=float(drag_max))
@@ -213,7 +274,7 @@ def mesh_drag_warp(
         warped = F.grid_sample(
             nchw,
             grid,
-            mode="bilinear",
+            mode=sampling_interpolation,
             padding_mode=padding_mode,
             align_corners=True,
         )
@@ -229,6 +290,9 @@ def mesh_drag_warp_image(
     seed: int,
     padding_mode: str = "border",
     vertex_spacing: int = _DEFAULT_IMAGE_VERTEX_SPACING,
+    displacement_interpolation: str = "bicubic",
+    spline_passes: int = 2,
+    sampling_interpolation: str = "bilinear",
 ) -> torch.Tensor:
     """
     Warp an image tensor using the same mesh drag logic.
@@ -264,6 +328,9 @@ def mesh_drag_warp_image(
             seed=seed,
             padding_mode=padding_mode,
             vertex_spacing=vertex_spacing,
+            displacement_interpolation=displacement_interpolation,
+            spline_passes=spline_passes,
+            sampling_interpolation=sampling_interpolation,
         )
         return warped_nchw.permute(0, 2, 3, 1)
 
@@ -276,6 +343,9 @@ def mesh_drag_warp_image(
             seed=seed,
             padding_mode=padding_mode,
             vertex_spacing=vertex_spacing,
+            displacement_interpolation=displacement_interpolation,
+            spline_passes=spline_passes,
+            sampling_interpolation=sampling_interpolation,
         )
 
     raise ValueError(
@@ -294,6 +364,9 @@ class LatentMeshDrag:
     RETURN_TYPES = ("LATENT",)
     RETURN_NAMES = ("latent",)
     FUNCTION = "drag"
+
+    _DISPLACEMENT_INTERPOLATION_OPTIONS: Tuple[str, ...] = _DISPLACEMENT_INTERPOLATION_MODES
+    _SAMPLING_INTERPOLATION_OPTIONS: Tuple[str, ...] = _SAMPLING_INTERPOLATION_MODES
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Dict[str, tuple]]:
@@ -329,9 +402,36 @@ class LatentMeshDrag:
                     "tooltip": "Maximum drag distance (latent pixels).",
                 }),
             },
+            "optional": {
+                "displacement_interpolation": (cls._DISPLACEMENT_INTERPOLATION_OPTIONS, {
+                    "default": "bicubic",
+                    "tooltip": "How to interpolate the sparse mesh drags into a full displacement field. "
+                               "Use 'bspline' for smoother, more organic warps.",
+                }),
+                "spline_passes": ("INT", {
+                    "default": 2,
+                    "min": 0,
+                    "max": 16,
+                    "tooltip": "Only used when displacement_interpolation = 'bspline'. More passes = smoother warp.",
+                }),
+                "sampling_interpolation": (cls._SAMPLING_INTERPOLATION_OPTIONS, {
+                    "default": "bilinear",
+                    "tooltip": "How to sample the source tensor when applying the warp (bilinear/bicubic/nearest).",
+                }),
+            },
         }
 
-    def drag(self, latent, seed: int, points: int, drag_min: float, drag_max: float):
+    def drag(
+        self,
+        latent,
+        seed: int,
+        points: int,
+        drag_min: float,
+        drag_max: float,
+        displacement_interpolation: str = "bicubic",
+        spline_passes: int = 2,
+        sampling_interpolation: str = "bilinear",
+    ):
         if not isinstance(latent, dict) or "samples" not in latent:
             raise ValueError("LATENT input must be a dictionary containing a 'samples' tensor.")
 
@@ -340,15 +440,27 @@ class LatentMeshDrag:
             raise ValueError(f"LATENT['samples'] must be a torch.Tensor, got {type(samples)}.")
 
         logger.debug(
-            "Applying LatentMeshDrag: samples=%s points=%d drag=[%.3f, %.3f] seed=%d",
+            "Applying LatentMeshDrag: samples=%s points=%d drag=[%.3f, %.3f] seed=%d disp=%s spline=%d sample=%s",
             tuple(samples.shape),
             points,
             drag_min,
             drag_max,
             seed,
+            displacement_interpolation,
+            spline_passes,
+            sampling_interpolation,
         )
 
-        warped = mesh_drag_warp(samples, points=int(points), drag_min=float(drag_min), drag_max=float(drag_max), seed=int(seed))
+        warped = mesh_drag_warp(
+            samples,
+            points=int(points),
+            drag_min=float(drag_min),
+            drag_max=float(drag_max),
+            seed=int(seed),
+            displacement_interpolation=str(displacement_interpolation),
+            spline_passes=int(spline_passes),
+            sampling_interpolation=str(sampling_interpolation),
+        )
 
         output = latent.copy()
         output["samples"] = warped
@@ -361,6 +473,9 @@ class LatentMeshDrag:
                 drag_min=float(drag_min),
                 drag_max=float(drag_max),
                 seed=int(seed),
+                displacement_interpolation=str(displacement_interpolation),
+                spline_passes=int(spline_passes),
+                sampling_interpolation=str(sampling_interpolation),
             )
         return (output,)
 
@@ -376,6 +491,9 @@ class ImageMeshDrag:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "drag"
+
+    _DISPLACEMENT_INTERPOLATION_OPTIONS: Tuple[str, ...] = _DISPLACEMENT_INTERPOLATION_MODES
+    _SAMPLING_INTERPOLATION_OPTIONS: Tuple[str, ...] = _SAMPLING_INTERPOLATION_MODES
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Dict[str, tuple]]:
@@ -411,19 +529,49 @@ class ImageMeshDrag:
                     "tooltip": "Maximum drag distance (image pixels).",
                 }),
             },
+            "optional": {
+                "displacement_interpolation": (cls._DISPLACEMENT_INTERPOLATION_OPTIONS, {
+                    "default": "bicubic",
+                    "tooltip": "How to interpolate the sparse mesh drags into a full displacement field. "
+                               "Use 'bspline' for smoother, more organic warps.",
+                }),
+                "spline_passes": ("INT", {
+                    "default": 2,
+                    "min": 0,
+                    "max": 16,
+                    "tooltip": "Only used when displacement_interpolation = 'bspline'. More passes = smoother warp.",
+                }),
+                "sampling_interpolation": (cls._SAMPLING_INTERPOLATION_OPTIONS, {
+                    "default": "bilinear",
+                    "tooltip": "How to sample the source image when applying the warp (bilinear/bicubic/nearest).",
+                }),
+            },
         }
 
-    def drag(self, image, seed: int, points: int, drag_min: float, drag_max: float):
+    def drag(
+        self,
+        image,
+        seed: int,
+        points: int,
+        drag_min: float,
+        drag_max: float,
+        displacement_interpolation: str = "bicubic",
+        spline_passes: int = 2,
+        sampling_interpolation: str = "bilinear",
+    ):
         if not isinstance(image, torch.Tensor):
             raise ValueError(f"IMAGE input must be a torch.Tensor, got {type(image)}.")
 
         logger.debug(
-            "Applying ImageMeshDrag: image=%s points=%d drag=[%.3f, %.3f] seed=%d",
+            "Applying ImageMeshDrag: image=%s points=%d drag=[%.3f, %.3f] seed=%d disp=%s spline=%d sample=%s",
             tuple(image.shape),
             points,
             drag_min,
             drag_max,
             seed,
+            displacement_interpolation,
+            spline_passes,
+            sampling_interpolation,
         )
 
         warped = mesh_drag_warp_image(
@@ -432,6 +580,9 @@ class ImageMeshDrag:
             drag_min=float(drag_min),
             drag_max=float(drag_max),
             seed=int(seed),
+            displacement_interpolation=str(displacement_interpolation),
+            spline_passes=int(spline_passes),
+            sampling_interpolation=str(sampling_interpolation),
         )
         return (warped,)
 
