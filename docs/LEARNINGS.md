@@ -60,3 +60,7 @@
 - Comfy's runtime enforces that `model_sampling` children are `nn.Module` instances,
   so our DyPE wrapper now subclasses `torch.nn.Module` to satisfy `ModelPatcher` and
   GPU loading without mutating the wrapped sampler.
+- A cloth-like latent deformation can be approximated by dragging a sparse subset of
+  vertices on a coarse 2D mesh, upsampling the resulting displacement field, and
+  applying it with `torch.nn.functional.grid_sample` so the warp stays smooth while
+  remaining deterministic via per-batch seeded vertex selection.

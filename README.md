@@ -18,12 +18,15 @@ high-resolution generation.
     spatial rotary embeddings. It allows the diffusion model to stay coherent
     far beyond its native training resolution by applying Dynamic Position
     Extrapolation (DyPE).
+3.  **Latent Mesh Drag:** A latent-space perturbation node that drags random
+    mesh vertices to create cloth-like spatial warps while keeping the overall
+    image recognizable.
 
 ## Installation
 
 1. Clone this repository inside the `custom_nodes/` directory of your ComfyUI
    installation.
-2. Launch ComfyUI; the nodes will be registered under **Flow Matching** and **DyPE** categories.
+2. Launch ComfyUI; the nodes will be registered under **latent/upscaling**, **latent/perturb**, **latent/debug**, and **model_patches/unet** categories.
 
 ## Example Workflow
 
@@ -183,6 +186,26 @@ The `method` parameter determines the math used to handle coordinates outside th
 
 **Outputs**
 - `model`: The patched model ready for the KSampler.
+
+---
+
+## Part 3: Latent Mesh Drag
+
+`Latent Mesh Drag` applies a cloth-like deformation directly to a `LATENT` by
+randomly dragging a subset of vertices on a coarse mesh and smoothly
+interpolating the displacement across the latent.
+
+Drag distances are specified in **latent pixels** (multiply by ~8 for image-space pixels with SD-style VAEs).
+
+### Node Parameters: Latent Mesh Drag
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `latent` | LATENT | – | Latent to warp. |
+| `seed` | INT | `0` | Controls vertex selection and drag vectors. |
+| `points` | INT | `12` | Number of mesh vertices to drag. |
+| `drag_min` | FLOAT | `0.0` | Minimum drag distance (latent pixels). |
+| `drag_max` | FLOAT | `4.0` | Maximum drag distance (latent pixels). |
 
 ---
 

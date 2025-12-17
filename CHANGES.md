@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.5 - 2025-12-17
+- Added Latent Mesh Drag node for cloth-like latent-space spatial warps.
+- Added deterministic mesh-warp tests (including noise-mask lockstep coverage).
+
 ## 1.0.2 - 2025-11-14
 - Added DyPE for Qwen Image node with dynamic import fallbacks for standalone usage.
 - Ported DyPE rotary embedding utilities and spatial patcher to this repository.
