@@ -312,6 +312,9 @@ def mesh_drag_warp_image(
             seed=seed,
             padding_mode=padding_mode,
             vertex_spacing=vertex_spacing,
+            displacement_interpolation=displacement_interpolation,
+            spline_passes=spline_passes,
+            sampling_interpolation=sampling_interpolation,
         )
         return warped.squeeze(0)
 
