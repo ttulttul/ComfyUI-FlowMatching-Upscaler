@@ -193,9 +193,20 @@ The `method` parameter determines the math used to handle coordinates outside th
 
 `Latent Mesh Drag` applies a cloth-like deformation directly to a `LATENT` by
 randomly dragging a subset of vertices on a coarse mesh and smoothly
-interpolating the displacement across the latent.
+interpolating the displacement across the latent. Use these nodes when you need
+a bit of randomness injected into your image or latent between `Flow Matching
+Stage` nodes, or really at any time. Dragging the pixels around can be more
+effective at generating interesting results than simply adding pixel noise,
+particularly in conjuction with flow matching models.
+
+Spline interpolation makes the dragging buttery smooth like finger painting.
 
 Drag distances are specified in **latent pixels** (multiply by ~8 for image-space pixels with SD-style VAEs).
+
+<p align="left">
+  <img src="examples/Mesh-Drag-Example.png" alt="Example workflow using the Mesh Drag nodes">
+</p>
+
 
 ### Node Parameters: Latent Mesh Drag
 
