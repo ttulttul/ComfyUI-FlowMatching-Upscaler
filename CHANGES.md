@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.0.0 - 2025-12-23
+- BREAKING: Moved mesh-drag and latent debug nodes into the standalone `Skoogeer-Noise` pack.
+
 ## 1.0.7 - 2025-12-17
 - Added selectable mesh-drag interpolation options, including a B-spline-smoothed displacement mode for more organic warps.
 

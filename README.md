@@ -18,15 +18,16 @@ high-resolution generation.
     spatial rotary embeddings. It allows the diffusion model to stay coherent
     far beyond its native training resolution by applying Dynamic Position
     Extrapolation (DyPE).
-3.  **Mesh Drag (Latent / Image):** Spatial perturbation nodes that drag random
-    mesh vertices to create cloth-like warps while keeping the overall content
-    recognizable.
+
+The mesh drag and latent diagnostic nodes that previously shipped here now live
+in the `Skoogeer-Noise` node pack.
 
 ## Installation
 
 1. Clone this repository inside the `custom_nodes/` directory of your ComfyUI
    installation.
-2. Launch ComfyUI; the nodes will be registered under **latent/upscaling**, **latent/perturb**, **latent/debug**, and **model_patches/unet** categories.
+2. Launch ComfyUI; the nodes will be registered under **latent/upscaling** and **model_patches/unet** categories.
+   (Mesh drag + latent debug moved to `Skoogeer-Noise`.)
 
 ## Example Workflow
 
@@ -189,58 +190,10 @@ The `method` parameter determines the math used to handle coordinates outside th
 
 ---
 
-## Part 3: Mesh Drag
+## Mesh Drag / Latent Debug Nodes
 
-`Latent Mesh Drag` applies a cloth-like deformation directly to a `LATENT` by
-randomly dragging a subset of vertices on a coarse mesh and smoothly
-interpolating the displacement across the latent. Use these nodes when you need
-a bit of randomness injected into your image or latent between `Flow Matching
-Stage` nodes, or really at any time. Dragging the pixels around can be more
-effective at generating interesting results than simply adding pixel noise,
-particularly in conjuction with flow matching models.
-
-Spline interpolation makes the dragging buttery smooth like finger painting.
-
-Drag distances are specified in **latent pixels** (multiply by ~8 for image-space pixels with SD-style VAEs).
-
-<p align="left">
-  <img src="examples/Mesh-Drag-Example.png" alt="Example workflow using the Mesh Drag nodes">
-</p>
-
-
-### Node Parameters: Latent Mesh Drag
-
-| Field | Type | Default | Purpose |
-|-------|------|---------|---------|
-| `latent` | LATENT | – | Latent to warp. |
-| `seed` | INT | `0` | Controls vertex selection and drag vectors. |
-| `points` | INT | `12` | Number of mesh vertices to drag. |
-| `drag_min` | FLOAT | `0.0` | Minimum drag distance (latent pixels). |
-| `drag_max` | FLOAT | `4.0` | Maximum drag distance (latent pixels). |
-| `displacement_interpolation` | enum | `bicubic` | Interpolation used to expand the mesh drags into a displacement field (`bspline` is smoother). |
-| `spline_passes` | INT | `2` | B-spline smoothing passes (only used when `displacement_interpolation = bspline`). |
-| `sampling_interpolation` | enum | `bilinear` | Interpolation used while sampling the source latent during the warp. |
-
----
-
-`Image Mesh Drag` applies the same deformation in image space and accepts ComfyUI `IMAGE` tensors.
-
-Drag distances are specified in **image pixels**.
-
-### Node Parameters: Image Mesh Drag
-
-| Field | Type | Default | Purpose |
-|-------|------|---------|---------|
-| `image` | IMAGE | – | Image to warp. |
-| `seed` | INT | `0` | Controls vertex selection and drag vectors. |
-| `points` | INT | `12` | Number of mesh vertices to drag. |
-| `drag_min` | FLOAT | `0.0` | Minimum drag distance (image pixels). |
-| `drag_max` | FLOAT | `32.0` | Maximum drag distance (image pixels). |
-| `displacement_interpolation` | enum | `bicubic` | Interpolation used to expand the mesh drags into a displacement field (`bspline` is smoother). |
-| `spline_passes` | INT | `2` | B-spline smoothing passes (only used when `displacement_interpolation = bspline`). |
-| `sampling_interpolation` | enum | `bilinear` | Interpolation used while sampling the source image during the warp. |
-
----
+The mesh drag and latent debug nodes previously shipped in this repo were split
+into the `Skoogeer-Noise` node pack so they can be installed independently.
 
 ## Development
 

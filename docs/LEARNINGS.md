@@ -70,3 +70,6 @@
 - Offering a B-spline-smoothed displacement interpolation (bicubic upsample + separable
   cubic B-spline blur passes) makes mesh drags feel more organic without the cost and
   instability of full thin-plate-spline warps at high point counts.
+- Splitting mesh-drag + latent diagnostic nodes into a standalone `Skoogeer-Noise` pack
+  keeps this repository focused on flow-matching upscaling + DyPE while letting the
+  perturbation/debug helpers evolve independently.
