@@ -272,10 +272,16 @@ def _frequency_blend(
         squeezed_temporal = True
     elif original.dim() > 4:
         # Fall back to linear blend for multi-frame video latents
+        if dilated.device != original.device:
+            dilated = dilated.to(original.device)
         return torch.lerp(original, dilated, blend)
 
     device = original.device
     dtype = original.dtype
+
+    # Ensure both tensors are on the same device
+    if dilated.device != device:
+        dilated = dilated.to(device)
 
     # Work in float32 for FFT precision
     orig_f32 = original.float()
@@ -1481,6 +1487,9 @@ class FlowMatchingProgressiveUpscaler:
                 )
 
             _log_channel_stats(f"{stage_label} refined", refined_samples)
+            # Ensure tensors are on the same device before blending
+            if skip_reference.device != refined_samples.device:
+                skip_reference = skip_reference.to(refined_samples.device)
             blended = torch.lerp(refined_samples, skip_reference, stage.skip_blend)
             _log_channel_stats(f"{stage_label} blended", blended)
 
@@ -1813,6 +1822,9 @@ class FlowMatchingStage:
                 crop="disabled",
             )
 
+        # Ensure tensors are on the same device before blending
+        if skip_reference.device != refined_samples.device:
+            skip_reference = skip_reference.to(refined_samples.device)
         blended = torch.lerp(refined_samples, skip_reference, skip_blend)
 
         if enable_dilated_sampling == "enable":
