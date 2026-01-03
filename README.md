@@ -18,6 +18,9 @@ high-resolution generation.
     spatial rotary embeddings. It allows the diffusion model to stay coherent
     far beyond its native training resolution by applying Dynamic Position
     Extrapolation (DyPE).
+3.  **Latent Upscale Advanced:** A covariance-aware latent resampler inspired by
+    `upscaling.md` (global whitening → upscale → re-color, plus optional
+    moment-matching so channel statistics stay consistent after interpolation).
 
 The mesh drag and latent diagnostic nodes that previously shipped here now live
 in the `Skoogeer-Noise` node pack.
@@ -137,8 +140,8 @@ Chain these nodes manually for caching benefits.
 *   `next_seed`: Connect this output to the `seed` of the next stage for deterministic chains.
 *   Dilated refinement blends results in the frequency domain automatically—no manual method selection is required.
 
-#### 2. LatentChannelStatsPreview
-A lightweight debug node that visualizes latent channel statistics (Means = Blue, Std Dev = Orange). Useful for spotting channels that dominate energy budgets.
+#### 2. Latent Upscale Advanced
+Upscales latents using covariance-aware whitening (PCA/eigenbasis) so spatial interpolation respects cross-channel statistics. Enable `moment_match` to re-match mean/covariance after upscaling.
 
 ---
 

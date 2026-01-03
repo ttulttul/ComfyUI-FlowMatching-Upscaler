@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1.0 - 2026-01-03
+- Added `Latent Upscale Advanced` node implementing covariance-aware whitening + optional moment matching.
+- Added unit tests covering covariance-aware upscaling behavior.
+
 ## 2.0.0 - 2025-12-23
 - BREAKING: Moved mesh-drag and latent debug nodes into the standalone `Skoogeer-Noise` pack.
 

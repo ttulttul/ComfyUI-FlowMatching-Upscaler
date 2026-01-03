@@ -73,3 +73,7 @@
 - Splitting mesh-drag + latent diagnostic nodes into a standalone `Skoogeer-Noise` pack
   keeps this repository focused on flow-matching upscaling + DyPE while letting the
   perturbation/debug helpers evolve independently.
+- A covariance-aware latent upscale can be implemented cheaply with global PCA whitening
+  (estimate μ/Σ → whiten → upscale → re-color) plus an optional moment-matching pass to
+  restore the target mean/covariance after interpolation; using `torch.linalg.eigh`
+  keeps the transform stable even when the sample covariance is only semi-definite.
