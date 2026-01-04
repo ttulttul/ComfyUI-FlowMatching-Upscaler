@@ -43,11 +43,8 @@ def _log_channel_stats(label: str, tensor: torch.Tensor, *, limit: int = 16) -> 
 def _maybe_fallback_lanczos(method: str, channels: int) -> str:
     if method != "lanczos":
         return method
-    if channels in (1, 3, 4):
-        return method
     logger.warning(
-        "Lanczos upscaling is unsupported for %d-channel latents. Falling back to bicubic.",
-        channels,
+        "Lanczos upscaling uses PIL under the hood and is unsafe for LATENT tensors; falling back to bicubic.",
     )
     return "bicubic"
 
@@ -259,20 +256,26 @@ class LatentUpscaleAdvanced:
                     "tooltip": "Spatial scale factor applied to the latent grid (e.g., 2.0 = 2× latent resolution).",
                 }),
                 "upscale_method": (cls._UPSCALE_METHODS, {
-                    "default": "bicubic",
-                    "tooltip": "Resampling kernel for spatial upscaling (applied to whitened latents when enabled).",
+                    "default": "nearest-exact",
+                    "tooltip": (
+                        "Resampling kernel for spatial upscaling. NOTE: ComfyUI's `lanczos` path uses PIL and "
+                        "is unsafe for LATENT tensors; this node will fall back to `bicubic` if selected."
+                    ),
                 }),
                 "crop": (cls._CROP_METHODS, {
                     "default": "disabled",
                     "tooltip": "Cropping behavior when target aspect ratio differs (rare when using scale_by).",
                 }),
                 "covariance_mode": (cls._COVARIANCE_MODES, {
-                    "default": "whiten",
+                    "default": "none",
                     "tooltip": "Enable covariance-aware whitening (whiten→upscale→recolor).",
                 }),
                 "moment_match": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "After upscaling, apply an affine correction so the upscaled latent matches the source mean/covariance.",
+                    "default": False,
+                    "tooltip": (
+                        "After upscaling (with covariance_mode=whiten), apply an affine correction so the upscaled "
+                        "latent matches the source mean/covariance."
+                    ),
                 }),
                 "per_batch_stats": ("BOOLEAN", {
                     "default": True,

@@ -26,6 +26,17 @@ def _mean_cov(samples: torch.Tensor, *, epsilon: float = 0.0) -> tuple[torch.Ten
     return mu, cov
 
 
+def test_defaults_are_safe_and_match_core_latent_upscale_expectations():
+    input_types = LatentUpscaleAdvanced.INPUT_TYPES()
+    upscale_method_spec = input_types["required"]["upscale_method"][1]
+    covariance_spec = input_types["required"]["covariance_mode"][1]
+    moment_match_spec = input_types["required"]["moment_match"][1]
+
+    assert upscale_method_spec["default"] == "nearest-exact"
+    assert covariance_spec["default"] == "none"
+    assert moment_match_spec["default"] is False
+
+
 def test_scale_by_one_returns_input_unchanged():
     node = LatentUpscaleAdvanced()
     latent = {"samples": torch.randn(1, 4, 8, 8)}
@@ -46,6 +57,33 @@ def test_scale_by_one_returns_input_unchanged():
     )
 
     assert out is latent
+
+
+def test_lanczos_falls_back_to_bicubic_for_latents():
+    import comfy.utils  # imported via stubs in conftest
+
+    comfy.utils._common_upscale_calls.clear()
+
+    node = LatentUpscaleAdvanced()
+    latent = {"samples": torch.ones(1, 4, 4, 4)}
+
+    (out,) = node.upscale(
+        samples=latent,
+        scale_by=2.0,
+        upscale_method="lanczos",
+        crop="disabled",
+        covariance_mode="none",
+        moment_match=False,
+        per_batch_stats=True,
+        stats_sample_pixels=0,
+        stats_seed=0,
+        shrinkage=0.0,
+        epsilon=0.0,
+        stats_latent=None,
+    )
+
+    assert tuple(out["samples"].shape) == (1, 4, 8, 8)
+    assert comfy.utils._common_upscale_calls[0]["method"] == "bicubic"
 
 
 def test_covariance_mode_none_resizes_samples_and_noise_mask():
@@ -178,4 +216,3 @@ def test_moment_match_reduces_covariance_error(monkeypatch):
 
     assert err_match < err_no_match
     assert err_match < 1e-3
-

@@ -77,3 +77,11 @@
   (estimate μ/Σ → whiten → upscale → re-color) plus an optional moment-matching pass to
   restore the target mean/covariance after interpolation; using `torch.linalg.eigh`
   keeps the transform stable even when the sample covariance is only semi-definite.
+- ComfyUI’s `common_upscale(..., upscale_method="lanczos")` path uses PIL and clamps to
+  image-like ranges, making it unsafe for `LATENT` tensors; treat it as a deprecated
+  alias for `bicubic` when resizing latents.
+- Any global linear transform applied on the channel axis (e.g., PCA whitening) commutes
+  with per-channel linear spatial interpolation kernels (nearest/bilinear/bicubic/area),
+  so `whiten → linear_upscale → recolor` is algebraically identical to directly upscaling
+  the latent; only non-linear methods (e.g., `bislerp`) or per-component kernels can
+  produce a materially different result.

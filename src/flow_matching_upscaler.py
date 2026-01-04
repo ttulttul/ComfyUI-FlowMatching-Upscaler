@@ -236,15 +236,12 @@ def progressive_upscale_latent(
 
     upscale_method = method
 
-    # Lanczos uses PIL internally and only supports 1/3/4 channel tensors.
-    if method == "lanczos" and latent.ndim >= 4:
-        channels = latent.shape[1]
-        if channels not in (1, 3, 4):
-            logger.warning(
-                "Lanczos upscaling is unsupported for %d-channel latents. Falling back to bicubic.",
-                channels,
-            )
-            upscale_method = "bicubic"
+    # Lanczos uses PIL internally and is unsafe for LATENT tensors.
+    if method == "lanczos":
+        logger.warning(
+            "Lanczos upscaling uses PIL under the hood and is unsafe for LATENT tensors; falling back to bicubic."
+        )
+        upscale_method = "bicubic"
 
     with torch.no_grad():
         upscaled = comfy.utils.common_upscale(
