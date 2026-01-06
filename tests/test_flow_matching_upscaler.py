@@ -635,6 +635,52 @@ class FlowMatchingUpscalerTests(unittest.TestCase):
             )
         )
 
+    def test_stage_nodes_expose_tooltips_for_inputs(self):
+        stage_specs = fm_upscaler.FlowMatchingStage.INPUT_TYPES()
+        for section in ("required", "optional"):
+            for name, spec in stage_specs.get(section, {}).items():
+                self.assertGreaterEqual(
+                    len(spec),
+                    2,
+                    msg=f"FlowMatchingStage.{section}.{name} should include an options dict with a tooltip.",
+                )
+                self.assertIn(
+                    "tooltip",
+                    spec[1],
+                    msg=f"FlowMatchingStage.{section}.{name} should include a tooltip.",
+                )
+                self.assertTrue(
+                    str(spec[1]["tooltip"]).strip(),
+                    msg=f"FlowMatchingStage.{section}.{name} tooltip should be non-empty.",
+                )
+
+        prep_specs = fm_upscaler.FlowMatchingStagePrep.INPUT_TYPES()
+        for section in ("required", "optional"):
+            for name, spec in prep_specs.get(section, {}).items():
+                self.assertGreaterEqual(
+                    len(spec),
+                    2,
+                    msg=f"FlowMatchingStagePrep.{section}.{name} should include an options dict with a tooltip.",
+                )
+                self.assertIn(
+                    "tooltip",
+                    spec[1],
+                    msg=f"FlowMatchingStagePrep.{section}.{name} should include a tooltip.",
+                )
+
+        merge_specs = fm_upscaler.FlowMatchingStageMerge.INPUT_TYPES()
+        for name, spec in merge_specs.get("required", {}).items():
+            self.assertGreaterEqual(
+                len(spec),
+                2,
+                msg=f"FlowMatchingStageMerge.required.{name} should include an options dict with a tooltip.",
+            )
+            self.assertIn(
+                "tooltip",
+                spec[1],
+                msg=f"FlowMatchingStageMerge.required.{name} should include a tooltip.",
+            )
+
     def test_stage_falls_back_to_streaming_on_oom(self):
         stage_node = fm_upscaler.FlowMatchingStage()
         latent = {"samples": torch.ones((1, 4, 8, 8), dtype=torch.float32)}

@@ -1122,19 +1122,21 @@ class FlowMatchingStage:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
-                "latent": ("LATENT",),
+                "model": ("MODEL", {"tooltip": "Flow-matching diffusion model to drive refinement."}),
+                "positive": ("CONDITIONING", {"tooltip": "Positive conditioning for CFG."}),
+                "negative": ("CONDITIONING", {"tooltip": "Negative conditioning for CFG."}),
+                "latent": ("LATENT", {"tooltip": "Latent to upscale and refine in this single stage."}),
                 "seed": ("INT", {
                     "default": 0,
                     "min": 0,
                     "max": 0xffffffffffffffff,
+                    "tooltip": "Seed controlling re-noising for this stage (and typically the sampler noise).",
                 }),
                 "steps": ("INT", {
                     "default": 16,
                     "min": 1,
                     "max": 256,
+                    "tooltip": "Denoising steps for this stage.",
                 }),
                 "cfg": ("FLOAT", {
                     "default": 4.5,
@@ -1142,26 +1144,30 @@ class FlowMatchingStage:
                     "max": 20.0,
                     "step": 0.1,
                     "round": 0.01,
+                    "tooltip": "Classifier Free Guidance strength.",
                 }),
-                "sampler_name": (cls._SAMPLERS, {}),
-                "scheduler": (cls._SCHEDULERS, {}),
+                "sampler_name": (cls._SAMPLERS, {"tooltip": "Sampler backend leveraged during refinement."}),
+                "scheduler": (cls._SCHEDULERS, {"tooltip": "Noise schedule applied during denoising."}),
                 "scale_factor": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.1,
                     "max": 8.0,
                     "step": 0.05,
+                    "tooltip": "Spatial scale factor applied to the latent grid for this stage.",
                 }),
                 "noise_ratio": ("FLOAT", {
                     "default": 0.0,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
+                    "tooltip": "Flow-style re-noise amount (0 = keep latent, 1 = replace with pure noise).",
                 }),
                 "skip_blend": ("FLOAT", {
                     "default": 0.5,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
+                    "tooltip": "Skip blend weight (0 = all denoised, 1 = all pre-sampler latent).",
                 }),
                 "denoise": ("FLOAT", {
                     "default": 1.0,
@@ -1169,29 +1175,38 @@ class FlowMatchingStage:
                     "max": 1.0,
                     "step": 0.01,
                     "round": 0.01,
+                    "tooltip": "Denoising strength supplied to the sampler.",
                 }),
                 "upscale_method": (cls._UPSCALE_METHODS, {
                     "default": "bicubic",
+                    "tooltip": (
+                        "Resampling kernel for spatial upscaling. NOTE: ComfyUI's `lanczos` path uses PIL and is "
+                        "unsafe for LATENT tensors; this node will fall back to `bicubic` if selected."
+                    ),
                 }),
             },
             "optional": {
                 "enable_dilated_sampling": (["disable", "enable"], {
                     "default": "disable",
+                    "tooltip": "Optionally run a dilated refinement pass for global coherence (experimental).",
                 }),
                 "reduce_memory_use": (["disable", "enable"], {
                     "default": "enable",
+                    "tooltip": "Enable to reduce VRAM use by avoiding extra tensor clones where possible.",
                 }),
                 "dilated_downscale": ("FLOAT", {
                     "default": 2.0,
                     "min": 1.0,
                     "max": 4.0,
                     "step": 0.25,
+                    "tooltip": "Factor used when downscaling for the dilated pass (>=1.0).",
                 }),
                 "dilated_blend": ("FLOAT", {
                     "default": 0.25,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
+                    "tooltip": "Blend weight of the dilated refinement result (frequency-domain blend).",
                 }),
                 "dilated_min_steps": ("INT", {
                     "default": 1,
@@ -1447,31 +1462,39 @@ class FlowMatchingStagePrep:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "latent": ("LATENT",),
+                "latent": ("LATENT", {"tooltip": "Latent to upscale and re-noise before sampling."}),
                 "seed": ("INT", {
                     "default": 0,
                     "min": 0,
                     "max": 0xffffffffffffffff,
+                    "tooltip": "Seed controlling flow re-noise (use as Custom Sampler noise seed for determinism).",
                 }),
                 "scale_factor": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.1,
                     "max": 8.0,
                     "step": 0.05,
+                    "tooltip": "Spatial scale factor applied to the latent grid for this stage.",
                 }),
                 "noise_ratio": ("FLOAT", {
                     "default": 0.0,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
+                    "tooltip": "Flow-style re-noise amount (0 = keep latent, 1 = replace with pure noise).",
                 }),
                 "upscale_method": (cls._UPSCALE_METHODS, {
                     "default": "bicubic",
+                    "tooltip": (
+                        "Resampling kernel for spatial upscaling. NOTE: ComfyUI's `lanczos` path uses PIL and is "
+                        "unsafe for LATENT tensors; this node will fall back to `bicubic` if selected."
+                    ),
                 }),
             },
             "optional": {
                 "reduce_memory_use": (["disable", "enable"], {
                     "default": "enable",
+                    "tooltip": "Enable to reduce VRAM use by avoiding extra tensor clones where possible.",
                 }),
             },
         }
@@ -1543,13 +1566,14 @@ class FlowMatchingStageMerge:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "skip_latent": ("LATENT",),
-                "sampled_latent": ("LATENT",),
+                "skip_latent": ("LATENT", {"tooltip": "Skip latent from FlowMatchingStagePrep (upscaled latent before sampling)."}),
+                "sampled_latent": ("LATENT", {"tooltip": "Sampled latent output from ComfyUI's Custom Sampler nodes."}),
                 "skip_blend": ("FLOAT", {
                     "default": 0.5,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
+                    "tooltip": "Skip blend weight (0 = all sampled, 1 = all skip latent).",
                 }),
             },
         }
