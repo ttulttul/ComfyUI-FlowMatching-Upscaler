@@ -139,7 +139,13 @@ Chain these nodes manually for caching benefits.
 *   `noise_ratio`: Amount of flow-noise to inject.
 *   `skip_blend`: Blend factor between pre-sampler latent and denoised result.
 *   `next_seed`: Connect this output to the `seed` of the next stage for deterministic chains.
-*   Dilated refinement blends results in the frequency domain automatically—no manual method selection is required.
+*   Dilated refinement blends results in the frequency domain automatically—no manual method selection is required (FlowMatchingStage only).
+
+**Custom Sampler workflow (modular):**
+*   `FlowMatchingStagePrep` outputs `skip_latent` + `presampler_latent` (+ `seed`/`next_seed`).
+*   Feed `presampler_latent` into ComfyUI’s `SamplerCustom` / `SamplerCustomAdvanced` (use `seed` as the noise seed).
+*   `FlowMatchingStageMerge` blends the sampled latent with `skip_latent` via `skip_blend`.
+*   This modular path intentionally omits the stage node’s low-VRAM fallback and dilated refinement.
 
 #### 2. Latent Upscale Advanced
 Upscales latents like ComfyUI’s built-in latent upscale node by default, with optional covariance-aware whitening (PCA/eigenbasis) and an optional `moment_match` pass to restore mean/covariance after interpolation. Note: ComfyUI’s `lanczos` path is image/PIL-based and is treated as `bicubic` for latents here.

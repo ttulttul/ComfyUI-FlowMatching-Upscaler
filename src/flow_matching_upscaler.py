@@ -1435,12 +1435,183 @@ class FlowMatchingStage:
         return (out, presampler_latent, next_seed, model, positive, negative)
 
 
+class FlowMatchingStagePrep:
+    CATEGORY = "latent/upscaling"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("LATENT", "LATENT", "INT", "INT")
+    RETURN_NAMES = ("skip_latent", "presampler_latent", "seed", "next_seed")
+
+    _UPSCALE_METHODS: Tuple[str, ...] = FlowMatchingStage._UPSCALE_METHODS
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xffffffffffffffff,
+                }),
+                "scale_factor": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.1,
+                    "max": 8.0,
+                    "step": 0.05,
+                }),
+                "noise_ratio": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                }),
+                "upscale_method": (cls._UPSCALE_METHODS, {
+                    "default": "bicubic",
+                }),
+            },
+            "optional": {
+                "reduce_memory_use": (["disable", "enable"], {
+                    "default": "enable",
+                }),
+            },
+        }
+
+    def execute(
+        self,
+        latent,
+        seed,
+        scale_factor,
+        noise_ratio,
+        upscale_method,
+        reduce_memory_use="enable",
+    ):
+        if not isinstance(latent, dict) or "samples" not in latent:
+            raise ValueError("FlowMatchingStagePrep expected a LATENT dict with a 'samples' entry.")
+
+        reduce_memory_flag = reduce_memory_use == "enable"
+
+        current_latent_dict = latent.copy()
+        current_latent = current_latent_dict["samples"]
+        if not isinstance(current_latent, torch.Tensor):
+            raise ValueError("FlowMatchingStagePrep expected latent['samples'] to be a torch.Tensor.")
+
+        logger.debug(
+            "Stage prep: scale_factor=%.3f noise_ratio=%.3f method=%s input_shape=%s",
+            scale_factor,
+            noise_ratio,
+            upscale_method,
+            tuple(current_latent.shape),
+        )
+
+        upscaled = progressive_upscale_latent(
+            current_latent,
+            scale_factor,
+            method=upscale_method,
+        )
+
+        _resize_noise_mask(
+            current_latent_dict,
+            scale_factor=scale_factor,
+            method=upscale_method,
+            context="FlowMatchingStagePrep/mask",
+        )
+
+        skip_reference = upscaled if reduce_memory_flag else upscaled.clone()
+        re_noised = apply_flow_renoise(
+            upscaled,
+            noise_ratio,
+            seed,
+        )
+
+        skip_latent = current_latent_dict.copy()
+        skip_latent["samples"] = skip_reference
+
+        presampler_latent = current_latent_dict.copy()
+        presampler_latent["samples"] = re_noised
+
+        next_seed = (seed + _SEED_STRIDE) & 0xFFFFFFFFFFFFFFFF
+        return (skip_latent, presampler_latent, seed, next_seed)
+
+
+class FlowMatchingStageMerge:
+    CATEGORY = "latent/upscaling"
+    FUNCTION = "execute"
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "skip_latent": ("LATENT",),
+                "sampled_latent": ("LATENT",),
+                "skip_blend": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                }),
+            },
+        }
+
+    def execute(
+        self,
+        skip_latent,
+        sampled_latent,
+        skip_blend,
+    ):
+        skip_blend = max(0.0, min(1.0, float(skip_blend)))
+
+        if not isinstance(skip_latent, dict) or "samples" not in skip_latent:
+            raise ValueError("FlowMatchingStageMerge expected skip_latent to be a LATENT dict with a 'samples' entry.")
+        if not isinstance(sampled_latent, dict) or "samples" not in sampled_latent:
+            raise ValueError("FlowMatchingStageMerge expected sampled_latent to be a LATENT dict with a 'samples' entry.")
+
+        skip_reference = skip_latent["samples"]
+        refined_samples = sampled_latent["samples"]
+        if not isinstance(skip_reference, torch.Tensor):
+            raise ValueError("FlowMatchingStageMerge expected skip_latent['samples'] to be a torch.Tensor.")
+        if not isinstance(refined_samples, torch.Tensor):
+            raise ValueError("FlowMatchingStageMerge expected sampled_latent['samples'] to be a torch.Tensor.")
+        if refined_samples.ndim != skip_reference.ndim:
+            raise ValueError(
+                "FlowMatchingStageMerge requires sampled_latent and skip_latent to have the same dimensionality; "
+                f"got sampled_latent ndim={refined_samples.ndim}, skip_latent ndim={skip_reference.ndim}."
+            )
+
+        if refined_samples.shape != skip_reference.shape:
+            logger.debug(
+                "Stage merge: rescaling sampled latent from %s to %s.",
+                tuple(refined_samples.shape),
+                tuple(skip_reference.shape),
+            )
+            refined_samples = comfy.utils.common_upscale(
+                refined_samples,
+                skip_reference.shape[-1],
+                skip_reference.shape[-2],
+                "bilinear",
+                crop="disabled",
+            )
+
+        if skip_reference.device != refined_samples.device:
+            skip_reference = skip_reference.to(refined_samples.device)
+
+        blended = torch.lerp(refined_samples, skip_reference, skip_blend)
+        out = skip_latent.copy()
+        out["samples"] = blended
+        return (out,)
+
+
 NODE_CLASS_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": FlowMatchingProgressiveUpscaler,
     "FlowMatchingStage": FlowMatchingStage,
+    "FlowMatchingStagePrep": FlowMatchingStagePrep,
+    "FlowMatchingStageMerge": FlowMatchingStageMerge,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FlowMatchingProgressiveUpscaler": "Flow Matching Progressive Upscaler",
     "FlowMatchingStage": "Flow Matching Stage",
+    "FlowMatchingStagePrep": "Flow Matching Stage Prep",
+    "FlowMatchingStageMerge": "Flow Matching Stage Merge",
 }

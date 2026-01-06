@@ -18,6 +18,10 @@
 - Exposing a per-stage node mirrors the progressive pipeline while allowing
   ComfyUI’s existing cache to short-circuit unchanged stages, speeding up
   iteration on late-stage parameters.
+- Splitting a stage into a pure-prep node (upscale + flow re-noise) and a pure-merge
+  node (skip blend) makes the approach modular and lets ComfyUI’s built-in
+  `SamplerCustom` / `SamplerCustomAdvanced` handle sampling, sigmas, guiders, and
+  alternative samplers without duplicating sampler logic in this repository.
 - Shipping a lightweight frontend extension lets custom nodes hook into ComfyUI’s
   live preview events so users retain the familiar inline thumbnail experience.
 - Progressive stages currently invoke `common_ksampler` on the full latent; to
