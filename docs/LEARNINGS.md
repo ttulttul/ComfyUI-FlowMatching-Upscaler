@@ -89,3 +89,6 @@
   so `whiten → linear_upscale → recolor` is algebraically identical to directly upscaling
   the latent; only non-linear methods (e.g., `bislerp`) or per-component kernels can
   produce a materially different result.
+- Filtering ComfyUI `IMAGE` batches for placeholder frames is simplest by computing the
+  per-image `amax(abs(pixels))` across HWC and dropping entries whose maximum magnitude
+  stays below an epsilon threshold (device-friendly and avoids per-pixel Python loops).

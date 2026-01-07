@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.1.3 - 2026-01-07
+- Added `Batch Filter Empty Images` utility node for removing all-zero images from an IMAGE batch (with epsilon tolerance).
+
 ## 2.1.2 - 2026-01-06
 - Added `FlowMatchingStagePrep` + `FlowMatchingStageMerge` nodes for integrating the flow-matching stage workflow with ComfyUI’s Custom Sampler nodes.
 - Added unit tests covering the new modular stage nodes.

@@ -30,6 +30,10 @@ if __package__:
         NODE_CLASS_MAPPINGS as LUA_NODE_CLASS_MAPPINGS,
         NODE_DISPLAY_NAME_MAPPINGS as LUA_DISPLAY_NAME_MAPPINGS,
     )
+    from .src.batch_filter_empty_images import (  # type: ignore[attr-defined] # noqa: F401
+        NODE_CLASS_MAPPINGS as BFEI_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as BFEI_DISPLAY_NAME_MAPPINGS,
+    )
 else:  # pragma: no cover - direct execution fallback
     _ROOT_DIR = pathlib.Path(__file__).resolve().parent
     _load_module_from_path("rope", _ROOT_DIR / "src" / "rope.py")
@@ -37,6 +41,10 @@ else:  # pragma: no cover - direct execution fallback
     flow_module = _load_module_from_path("flow_matching_upscaler", _ROOT_DIR / "src" / "flow_matching_upscaler.py")
     dype_module = _load_module_from_path("dype_qwen_image", _ROOT_DIR / "src" / "dype_qwen_image.py")
     latent_module = _load_module_from_path("latent_upscale_advanced", _ROOT_DIR / "src" / "latent_upscale_advanced.py")
+    batch_module = _load_module_from_path(
+        "batch_filter_empty_images",
+        _ROOT_DIR / "src" / "batch_filter_empty_images.py",
+    )
 
     FM_NODE_CLASS_MAPPINGS = getattr(flow_module, "NODE_CLASS_MAPPINGS")
     FM_DISPLAY_NAME_MAPPINGS = getattr(flow_module, "NODE_DISPLAY_NAME_MAPPINGS")
@@ -44,16 +52,20 @@ else:  # pragma: no cover - direct execution fallback
     DYPE_DISPLAY_NAME_MAPPINGS = getattr(dype_module, "NODE_DISPLAY_NAME_MAPPINGS")
     LUA_NODE_CLASS_MAPPINGS = getattr(latent_module, "NODE_CLASS_MAPPINGS")
     LUA_DISPLAY_NAME_MAPPINGS = getattr(latent_module, "NODE_DISPLAY_NAME_MAPPINGS")
+    BFEI_NODE_CLASS_MAPPINGS = getattr(batch_module, "NODE_CLASS_MAPPINGS")
+    BFEI_DISPLAY_NAME_MAPPINGS = getattr(batch_module, "NODE_DISPLAY_NAME_MAPPINGS")
 
 NODE_CLASS_MAPPINGS: Dict[str, Any] = {
     **FM_NODE_CLASS_MAPPINGS,
     **DYPE_NODE_CLASS_MAPPINGS,
     **LUA_NODE_CLASS_MAPPINGS,
+    **BFEI_NODE_CLASS_MAPPINGS,
 }
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     **FM_DISPLAY_NAME_MAPPINGS,
     **DYPE_DISPLAY_NAME_MAPPINGS,
     **LUA_DISPLAY_NAME_MAPPINGS,
+    **BFEI_DISPLAY_NAME_MAPPINGS,
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

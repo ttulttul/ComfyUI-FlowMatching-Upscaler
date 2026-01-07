@@ -22,6 +22,8 @@ high-resolution generation.
     `upscaling.md` (optional global whitening / moment matching around the
     spatial upscaler). Defaults to matching ComfyUI’s standard latent upscale
     behavior unless you enable covariance processing.
+4.  **Batch Filter Empty Images:** Utility node that removes all-zero entries
+    from an IMAGE batch (with optional epsilon tolerance).
 
 The mesh drag and latent diagnostic nodes that previously shipped here now live
 in the `Skoogeer-Noise` node pack.
@@ -31,7 +33,7 @@ in the `Skoogeer-Noise` node pack.
 1. Clone this repository inside the `custom_nodes/` directory of your ComfyUI
    installation.
 2. Launch ComfyUI; the nodes will be registered under **latent/upscaling** and **model_patches/unet** categories.
-   (Mesh drag + latent debug moved to `Skoogeer-Noise`.)
+   Utility nodes register under **utils/image**. (Mesh drag + latent debug moved to `Skoogeer-Noise`.)
 
 ## Example Workflow
 
