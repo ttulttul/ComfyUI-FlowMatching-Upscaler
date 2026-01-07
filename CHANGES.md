@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.1.4 - 2026-01-07
+- Moved `Batch Filter Empty Images` into the standalone `Skoogeer-Batch-Ops` node pack.
+
 ## 2.1.3 - 2026-01-07
 - Added `Batch Filter Empty Images` utility node for removing all-zero images from an IMAGE batch (with epsilon tolerance).
 

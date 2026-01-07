@@ -92,3 +92,5 @@
 - Filtering ComfyUI `IMAGE` batches for placeholder frames is simplest by computing the
   per-image `amax(abs(pixels))` across HWC and dropping entries whose maximum magnitude
   stays below an epsilon threshold (device-friendly and avoids per-pixel Python loops).
+- Keeping generic batch utilities in a dedicated node pack (for example `Skoogeer-Batch-Ops`)
+  helps this repository stay focused on flow-matching upscaling and DyPE.
