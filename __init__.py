@@ -22,6 +22,10 @@ if __package__:
         NODE_CLASS_MAPPINGS as DYPE_NODE_CLASS_MAPPINGS,
         NODE_DISPLAY_NAME_MAPPINGS as DYPE_DISPLAY_NAME_MAPPINGS,
     )
+    from .src.dype_flux2 import (  # type: ignore[attr-defined] # noqa: F401
+        NODE_CLASS_MAPPINGS as DYPE_FLUX2_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as DYPE_FLUX2_DISPLAY_NAME_MAPPINGS,
+    )
     from .src.flow_matching_upscaler import (  # type: ignore[attr-defined] # noqa: F401
         NODE_CLASS_MAPPINGS as FM_NODE_CLASS_MAPPINGS,
         NODE_DISPLAY_NAME_MAPPINGS as FM_DISPLAY_NAME_MAPPINGS,
@@ -36,23 +40,28 @@ else:  # pragma: no cover - direct execution fallback
     _load_module_from_path("qwen_spatial", _ROOT_DIR / "src" / "qwen_spatial.py")
     flow_module = _load_module_from_path("flow_matching_upscaler", _ROOT_DIR / "src" / "flow_matching_upscaler.py")
     dype_module = _load_module_from_path("dype_qwen_image", _ROOT_DIR / "src" / "dype_qwen_image.py")
+    dype_flux2_module = _load_module_from_path("dype_flux2", _ROOT_DIR / "src" / "dype_flux2.py")
     latent_module = _load_module_from_path("latent_upscale_advanced", _ROOT_DIR / "src" / "latent_upscale_advanced.py")
 
     FM_NODE_CLASS_MAPPINGS = getattr(flow_module, "NODE_CLASS_MAPPINGS")
     FM_DISPLAY_NAME_MAPPINGS = getattr(flow_module, "NODE_DISPLAY_NAME_MAPPINGS")
     DYPE_NODE_CLASS_MAPPINGS = getattr(dype_module, "NODE_CLASS_MAPPINGS")
     DYPE_DISPLAY_NAME_MAPPINGS = getattr(dype_module, "NODE_DISPLAY_NAME_MAPPINGS")
+    DYPE_FLUX2_NODE_CLASS_MAPPINGS = getattr(dype_flux2_module, "NODE_CLASS_MAPPINGS")
+    DYPE_FLUX2_DISPLAY_NAME_MAPPINGS = getattr(dype_flux2_module, "NODE_DISPLAY_NAME_MAPPINGS")
     LUA_NODE_CLASS_MAPPINGS = getattr(latent_module, "NODE_CLASS_MAPPINGS")
     LUA_DISPLAY_NAME_MAPPINGS = getattr(latent_module, "NODE_DISPLAY_NAME_MAPPINGS")
 
 NODE_CLASS_MAPPINGS: Dict[str, Any] = {
     **FM_NODE_CLASS_MAPPINGS,
     **DYPE_NODE_CLASS_MAPPINGS,
+    **DYPE_FLUX2_NODE_CLASS_MAPPINGS,
     **LUA_NODE_CLASS_MAPPINGS,
 }
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     **FM_DISPLAY_NAME_MAPPINGS,
     **DYPE_DISPLAY_NAME_MAPPINGS,
+    **DYPE_FLUX2_DISPLAY_NAME_MAPPINGS,
     **LUA_DISPLAY_NAME_MAPPINGS,
 }
 

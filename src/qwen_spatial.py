@@ -82,6 +82,22 @@ class _ModelGeometry:
 _EDITING_MODES = {"adaptive", "timestep_aware", "resolution_aware", "minimal", "full"}
 
 
+def _normalize_spatial_axes(spatial_axes: Iterable[int] | None, total_axes: int) -> Tuple[int, int]:
+    if spatial_axes is None:
+        spatial_axes = (1, 2)
+    axes = tuple(int(axis) for axis in spatial_axes)
+    if len(axes) != 2:
+        raise ValueError("spatial_axes must contain exactly two axes (height, width).")
+    if len(set(axes)) != len(axes):
+        raise ValueError(f"spatial_axes contains duplicate entries: {axes}.")
+    for axis in axes:
+        if axis < 0 or axis >= total_axes:
+            raise ValueError(
+                f"spatial_axes axis {axis} out of range for {total_axes} axes."
+            )
+    return axes
+
+
 def _select_freq_dtype(backing_embedder: nn.Module, device: torch.device) -> torch.dtype:
     default_dtype = getattr(backing_embedder, "freqs_dtype", torch.bfloat16)
     if not isinstance(default_dtype, torch.dtype):
@@ -135,9 +151,10 @@ class _DyPEModelSampling(nn.Module):
 
 class QwenSpatialPosEmbed(nn.Module):
     """
-    DyPE-enabled positional embedder for Qwen Image transformer blocks.
+    DyPE-enabled positional embedder for flow-matching transformer blocks.
     Replicates the structure produced by comfy.ldm.flux.layers.EmbedND while
-    allowing dynamic extrapolation of spatial rotary embeddings.
+    allowing dynamic extrapolation of spatial rotary embeddings (Qwen Image,
+    Flux2, etc.).
     """
 
     def __init__(
@@ -155,10 +172,14 @@ class QwenSpatialPosEmbed(nn.Module):
         backing_embedder: nn.Module,
         editing_strength: float,
         editing_mode: str,
+        spatial_axes: Iterable[int] | None = None,
     ):
         super().__init__()
         self.theta = theta
         self.axes_dim = list(axes_dim)
+        self.spatial_axes = _normalize_spatial_axes(spatial_axes, len(self.axes_dim))
+        self.height_axis = self.spatial_axes[0]
+        self.width_axis = self.spatial_axes[1]
         self.patch_size = int(patch_size)
         self.vae_scale_factor = max(int(vae_scale_factor), 1)
         self.method = _normalize_method(method)
@@ -237,9 +258,9 @@ class QwenSpatialPosEmbed(nn.Module):
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         if not isinstance(ids, torch.Tensor):
             raise TypeError("Expected ids to be a torch.Tensor.")
-        if ids.ndim != 3 or ids.shape[-1] != 3:
+        if ids.ndim != 3 or ids.shape[-1] != len(self.axes_dim):
             raise ValueError(
-                "QwenSpatialPosEmbed expects ids shaped [batch, tokens, 3]. "
+                "QwenSpatialPosEmbed expects ids shaped [batch, tokens, axes]. "
                 f"Received shape {tuple(ids.shape)}."
             )
 
@@ -248,18 +269,18 @@ class QwenSpatialPosEmbed(nn.Module):
 
         ids = ids.to(torch.float32)
         axis0 = ids[..., 0]
-        axis1 = ids[..., 1]
-        axis2 = ids[..., 2]
 
-        diff1 = (axis1 - axis0).abs()
-        diff2 = (axis2 - axis0).abs()
-        image_mask = torch.logical_or(diff1 > 1e-4, diff2 > 1e-4)
-        # Free intermediate tensors early
-        del diff1, diff2
+        image_mask = torch.zeros(axis0.shape, dtype=torch.bool, device=axis0.device)
+        for axis_idx in self.spatial_axes:
+            diff = (ids[..., axis_idx] - axis0).abs()
+            image_mask |= diff > 1e-4
+            del diff
 
         grid = self.grid
-        current_h = _estimate_axis_extent(axis1, image_mask, grid.base_axes[0])
-        current_w = _estimate_axis_extent(axis2, image_mask, grid.base_axes[1])
+        axis_h = ids[..., self.height_axis]
+        axis_w = ids[..., self.width_axis]
+        current_h = _estimate_axis_extent(axis_h, image_mask, grid.base_axes[0])
+        current_w = _estimate_axis_extent(axis_w, image_mask, grid.base_axes[1])
         del image_mask  # No longer needed
         current_ctx = max(current_h * current_w, 1)
 
@@ -278,10 +299,20 @@ class QwenSpatialPosEmbed(nn.Module):
         freqs_dtype = _select_freq_dtype(self.backing_embedder, ids.device)
 
         for axis_idx, axis_dim in enumerate(self.axes_dim):
+            is_spatial = axis_idx in self.spatial_axes
             strength_multiplier = 1.0
             exponent = self.dype_exponent
             axis_pos = ids[..., axis_idx]
-            axis_name = ["index", "height", "width"][axis_idx] if axis_idx < 3 else f"axis_{axis_idx}"
+            if axis_idx == 0:
+                axis_name = "index"
+            elif axis_idx == self.height_axis:
+                axis_name = "height"
+            elif axis_idx == self.width_axis:
+                axis_name = "width"
+            elif len(self.axes_dim) == 4 and axis_idx == 3:
+                axis_name = "text"
+            else:
+                axis_name = f"axis_{axis_idx}"
 
             common_kwargs = {
                 "dim": int(axis_dim),
@@ -293,10 +324,12 @@ class QwenSpatialPosEmbed(nn.Module):
             }
 
             dype_kwargs = {}
-            if self.enable_dype and axis_idx > 0:
+            if self.enable_dype and is_spatial:
+                axis_len = current_h if axis_idx == self.height_axis else current_w
+                base_len = grid.base_axes[0] if axis_idx == self.height_axis else grid.base_axes[1]
                 strength_multiplier, exponent = self._resolve_editing_strength(
-                    axis_len=current_h if axis_idx == 1 else current_w,
-                    base_len=grid.base_axes[axis_idx - 1],
+                    axis_len=axis_len,
+                    base_len=base_len,
                 )
                 dype_kwargs = {
                     "dype": True,
@@ -308,11 +341,11 @@ class QwenSpatialPosEmbed(nn.Module):
                 strength_multiplier = 1.0
                 ramp_factor = 0.0
 
-            if axis_idx == 1:
+            if axis_idx == self.height_axis:
                 base_len = grid.base_axes[0]
                 current_len = current_h
                 target_len = max(target_h, base_len)
-            elif axis_idx == 2:
+            elif axis_idx == self.width_axis:
                 base_len = grid.base_axes[1]
                 current_len = current_w
                 target_len = max(target_w, base_len)
@@ -323,7 +356,7 @@ class QwenSpatialPosEmbed(nn.Module):
 
             if (
                 self.current_editing
-                and axis_idx > 0
+                and is_spatial
                 and strength_multiplier < 1.0
                 and target_len > base_len
             ):
@@ -334,11 +367,12 @@ class QwenSpatialPosEmbed(nn.Module):
 
             mode = "base"
             log_suffix = ""
-            if axis_idx == 0 or self.method == "base":
+            axis_method = self.method if is_spatial else "base"
+            if axis_idx == 0 or axis_method == "base":
                 cos, sin = get_1d_rotary_pos_embed(**common_kwargs)
                 mode = "static"
             else:
-                if self.method == "yarn" and target_len > base_len:
+                if axis_method == "yarn" and target_len > base_len:
                     max_pe_len = torch.tensor(
                         target_len, dtype=freqs_dtype, device=axis_pos.device
                     )
@@ -352,7 +386,7 @@ class QwenSpatialPosEmbed(nn.Module):
                     ratio = target_len / max(base_len, 1)
                     mode = "yarn"
                     log_suffix = f" ratio={ratio:.4f}"
-                elif self.method == "ntk" and target_len > base_len:
+                elif axis_method == "ntk" and target_len > base_len:
                     ntk_factor = max(target_len / max(base_len, 1), 1.0)
                     cos, sin = get_1d_rotary_pos_embed(
                         **common_kwargs,
@@ -376,7 +410,7 @@ class QwenSpatialPosEmbed(nn.Module):
                 base_len,
                 current_len,
                 target_len,
-                self.method,
+                axis_method,
                 self.enable_dype,
                 self.current_editing,
                 strength_multiplier,
@@ -399,6 +433,213 @@ class QwenSpatialPosEmbed(nn.Module):
         emb = torch.cat(emb_parts, dim=-3)
         del emb_parts  # Free the list of matrices
         return emb.unsqueeze(1).to(ids.device)
+
+
+def _apply_dype_patch(
+    *,
+    model: ModelPatcher,
+    width: int,
+    height: int,
+    method: str,
+    enable_dype: bool,
+    dype_exponent: float,
+    base_width: int,
+    base_height: int,
+    base_shift: float,
+    max_shift: float,
+    auto_detect: bool,
+    editing_strength: float,
+    editing_mode: str,
+    spatial_axes: Iterable[int] | None,
+    expected_axes_len: int | None,
+    log_prefix: str,
+    geometry_label: str,
+) -> ModelPatcher:
+    cloned = model.clone()
+
+    diffusion_model = getattr(cloned.model, "diffusion_model", None)
+    if diffusion_model is None:
+        raise ValueError("The provided model does not expose a diffusion_model.")
+    if not hasattr(diffusion_model, "pe_embedder"):
+        raise ValueError("The provided model is missing a positional embedder.")
+    if not hasattr(diffusion_model.pe_embedder, "theta"):
+        raise ValueError("Unsupported positional embedder: missing theta attribute.")
+    if not hasattr(diffusion_model.pe_embedder, "axes_dim"):
+        raise ValueError("Unsupported positional embedder: missing axes_dim attribute.")
+
+    method_normalized = _normalize_method(method)
+    backing_embedder = diffusion_model.pe_embedder
+    axes_dim = list(getattr(backing_embedder, "axes_dim", []))
+    if expected_axes_len is not None and len(axes_dim) != expected_axes_len:
+        raise ValueError(
+            f"Unsupported positional embedder: expected {expected_axes_len} axes "
+            f"but found {len(axes_dim)}."
+        )
+
+    geometry = None
+    if auto_detect:
+        geometry = _detect_model_geometry(diffusion_model)
+        if geometry is not None:
+            logger.info(
+                "%s: detected geometry base_resolution=%s patch_size=%d "
+                "vae_scale_factor=%d",
+                log_prefix,
+                geometry.base_resolution,
+                geometry.patch_size,
+                geometry.vae_scale_factor,
+            )
+        else:
+            logger.warning(
+                "%s: failed to detect %s geometry; falling back to "
+                "provided base dimensions (%dx%d).",
+                log_prefix,
+                geometry_label,
+                base_width,
+                base_height,
+            )
+
+    patch_size = getattr(diffusion_model, "patch_size", None)
+    if geometry is not None:
+        patch_size = geometry.patch_size
+        base_width, base_height = geometry.base_resolution
+        vae_scale_factor = geometry.vae_scale_factor
+    else:
+        if patch_size is None:
+            raise ValueError("Unsupported diffusion model: missing patch_size attribute.")
+        vae_scale_factor = getattr(diffusion_model, "vae_scale_factor", 8)
+        try:
+            vae_scale_factor = max(int(vae_scale_factor), 1)
+        except Exception:
+            vae_scale_factor = 8
+
+    new_embedder = QwenSpatialPosEmbed(
+        theta=backing_embedder.theta,
+        axes_dim=axes_dim,
+        patch_size=patch_size,
+        vae_scale_factor=vae_scale_factor,
+        method=method_normalized,
+        enable_dype=enable_dype,
+        dype_exponent=dype_exponent,
+        base_resolution=(base_width, base_height),
+        target_resolution=(width, height),
+        backing_embedder=backing_embedder,
+        editing_strength=editing_strength,
+        editing_mode=editing_mode,
+        spatial_axes=spatial_axes,
+    )
+    cloned.add_object_patch("diffusion_model.pe_embedder", new_embedder)
+
+    model_sampler = getattr(cloned.model, "model_sampling", None)
+    sigma_max = None
+    if model_sampler is not None and hasattr(model_sampler, "sigma_max"):
+        sigma_max_value = getattr(model_sampler, "sigma_max")
+        try:
+            if hasattr(sigma_max_value, "item"):
+                sigma_max = float(sigma_max_value.item())
+            else:
+                sigma_max = float(sigma_max_value)
+        except (TypeError, ValueError):
+            sigma_max = None
+        if sigma_max is not None and sigma_max <= 0:
+            sigma_max = None
+
+    base_axes = new_embedder.grid.base_axes
+    max_axes = new_embedder.grid.max_axes
+    base_seq_len = max(base_axes[0] * base_axes[1], 1)
+    max_seq_len = max(max_axes[0] * max_axes[1], base_seq_len + 1)
+
+    current_axes = (
+        _compute_axis_len(height, patch_size, vae_scale_factor),
+        _compute_axis_len(width, patch_size, vae_scale_factor),
+    )
+    current_seq_len = max(current_axes[0] * current_axes[1], base_seq_len)
+
+    if max_seq_len <= base_seq_len:
+        slope = 0.0
+    else:
+        slope = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+    intercept = base_shift - slope * base_seq_len
+    dype_shift = current_seq_len * slope + intercept
+
+    # Patch model_sampling using a wrapper to avoid mutating the shared object.
+    # The wrapper delegates all attributes to the original sampler except sigma.
+    if enable_dype and model_sampler is not None:
+        is_flux = isinstance(model_sampler, model_sampling.ModelSamplingFlux)
+        has_sigma = hasattr(model_sampler, "sigma") and callable(getattr(model_sampler, "sigma"))
+
+        if is_flux or has_sigma:
+            wrapped_sampler = _DyPEModelSampling(model_sampler, dype_shift, is_flux)
+            cloned.add_object_patch("model_sampling", wrapped_sampler)
+            logger.info(
+                "%s: installed sampler shift via wrapper (is_flux=%s, dype_shift=%.4f).",
+                log_prefix,
+                is_flux,
+                dype_shift,
+            )
+
+    def dype_wrapper_function(model_function, args_dict):
+        if enable_dype:
+            timestep_tensor = args_dict.get("timestep")
+            c = args_dict.get("c", {})
+            input_x = args_dict.get("input")
+            adjust_enabled = editing_mode != "full" and editing_strength < 1.0
+            is_editing = False
+            if adjust_enabled and isinstance(c, dict):
+                editing_keys = {
+                    "image",
+                    "image_embeds",
+                    "image_tokens",
+                    "concat_latent_image",
+                    "concat_mask",
+                    "concat_mask_image",
+                }
+                for key in editing_keys:
+                    if key in c and c[key] is not None:
+                        is_editing = True
+                        break
+            if adjust_enabled and not is_editing and input_x is not None and hasattr(input_x, "abs"):
+                try:
+                    variance = float(input_x.abs().mean().item())
+                    if variance < 0.25:
+                        is_editing = True
+                except Exception:
+                    pass
+            current_sigma: float | None = None
+            if timestep_tensor is not None and sigma_max and sigma_max > 0:
+                if torch.is_tensor(timestep_tensor):
+                    if timestep_tensor.numel() > 0:
+                        current_sigma = float(timestep_tensor.reshape(-1)[0].item())
+                elif isinstance(timestep_tensor, (int, float)):
+                    current_sigma = float(timestep_tensor)
+            if current_sigma is not None:
+                normalized = max(min(current_sigma / sigma_max, 1.0), 0.0)
+                new_embedder.set_timestep(normalized, is_editing=is_editing)
+
+        input_x = args_dict.get("input")
+        timestep = args_dict.get("timestep")
+        conditioning = args_dict.get("c", {})
+        return model_function(input_x, timestep, **conditioning)
+
+    cloned.set_model_unet_function_wrapper(dype_wrapper_function)
+
+    grid = new_embedder.grid
+    logger.info(
+        "%s: patching positional embedder (method=%s, enable_dype=%s, "
+        "dype_exponent=%s, base_axes=%s, target_axes=%s, base_shift=%s, max_shift=%s, "
+        "editing_mode=%s, editing_strength=%.3f).",
+        log_prefix,
+        method_normalized,
+        enable_dype,
+        dype_exponent,
+        grid.base_axes,
+        grid.max_axes,
+        base_shift,
+        max_shift,
+        editing_mode,
+        editing_strength,
+    )
+
+    return cloned
 
 
 def _to_int_tuple(value: Tuple[int, int] | Iterable[int] | int) -> Tuple[int, int]:
@@ -512,182 +753,65 @@ def apply_dype_to_qwen_image(
     editing_strength: float,
     editing_mode: str,
 ) -> ModelPatcher:
-    cloned = model.clone()
-
-    diffusion_model = getattr(cloned.model, "diffusion_model", None)
-    if diffusion_model is None:
-        raise ValueError("The provided model does not expose a diffusion_model.")
-    if not hasattr(diffusion_model, "pe_embedder"):
-        raise ValueError("The provided model is missing a positional embedder.")
-    if not hasattr(diffusion_model.pe_embedder, "theta"):
-        raise ValueError("Unsupported positional embedder: missing theta attribute.")
-    if not hasattr(diffusion_model.pe_embedder, "axes_dim"):
-        raise ValueError("Unsupported positional embedder: missing axes_dim attribute.")
-
-    method_normalized = _normalize_method(method)
-    backing_embedder = diffusion_model.pe_embedder
-
-    geometry = None
-    if auto_detect:
-        geometry = _detect_model_geometry(diffusion_model)
-        if geometry is not None:
-            logger.info(
-                "DyPE_QwenImage: detected geometry base_resolution=%s patch_size=%d "
-                "vae_scale_factor=%d",
-                geometry.base_resolution,
-                geometry.patch_size,
-                geometry.vae_scale_factor,
-            )
-        else:
-            logger.warning(
-                "DyPE_QwenImage: failed to detect Qwen geometry; falling back to "
-                "provided base dimensions (%dx%d).",
-                base_width,
-                base_height,
-            )
-
-    patch_size = getattr(diffusion_model, "patch_size", None)
-    if geometry is not None:
-        patch_size = geometry.patch_size
-        base_width, base_height = geometry.base_resolution
-        vae_scale_factor = geometry.vae_scale_factor
-    else:
-        if patch_size is None:
-            raise ValueError("Unsupported diffusion model: missing patch_size attribute.")
-        vae_scale_factor = getattr(diffusion_model, "vae_scale_factor", 8)
-        try:
-            vae_scale_factor = max(int(vae_scale_factor), 1)
-        except Exception:
-            vae_scale_factor = 8
-
-    new_embedder = QwenSpatialPosEmbed(
-        theta=backing_embedder.theta,
-        axes_dim=backing_embedder.axes_dim,
-        patch_size=patch_size,
-        vae_scale_factor=vae_scale_factor,
-        method=method_normalized,
+    return _apply_dype_patch(
+        model=model,
+        width=width,
+        height=height,
+        method=method,
         enable_dype=enable_dype,
         dype_exponent=dype_exponent,
-        base_resolution=(base_width, base_height),
-        target_resolution=(width, height),
-        backing_embedder=backing_embedder,
+        base_width=base_width,
+        base_height=base_height,
+        base_shift=base_shift,
+        max_shift=max_shift,
+        auto_detect=auto_detect,
         editing_strength=editing_strength,
         editing_mode=editing_mode,
-    )
-    cloned.add_object_patch("diffusion_model.pe_embedder", new_embedder)
-
-    model_sampler = getattr(cloned.model, "model_sampling", None)
-    sigma_max = None
-    if model_sampler is not None and hasattr(model_sampler, "sigma_max"):
-        sigma_max_value = getattr(model_sampler, "sigma_max")
-        try:
-            if hasattr(sigma_max_value, "item"):
-                sigma_max = float(sigma_max_value.item())
-            else:
-                sigma_max = float(sigma_max_value)
-        except (TypeError, ValueError):
-            sigma_max = None
-        if sigma_max is not None and sigma_max <= 0:
-            sigma_max = None
-
-    base_axes = new_embedder.grid.base_axes
-    max_axes = new_embedder.grid.max_axes
-    base_seq_len = max(base_axes[0] * base_axes[1], 1)
-    max_seq_len = max(max_axes[0] * max_axes[1], base_seq_len + 1)
-
-    current_axes = (
-        _compute_axis_len(height, patch_size, vae_scale_factor),
-        _compute_axis_len(width, patch_size, vae_scale_factor),
-    )
-    current_seq_len = max(current_axes[0] * current_axes[1], base_seq_len)
-
-    if max_seq_len <= base_seq_len:
-        slope = 0.0
-    else:
-        slope = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-    intercept = base_shift - slope * base_seq_len
-    dype_shift = current_seq_len * slope + intercept
-
-    # Patch model_sampling using a wrapper to avoid mutating the shared object.
-    # The wrapper delegates all attributes to the original sampler except sigma.
-    if enable_dype and model_sampler is not None:
-        is_flux = isinstance(model_sampler, model_sampling.ModelSamplingFlux)
-        has_sigma = hasattr(model_sampler, "sigma") and callable(getattr(model_sampler, "sigma"))
-
-        if is_flux or has_sigma:
-            wrapped_sampler = _DyPEModelSampling(model_sampler, dype_shift, is_flux)
-            cloned.add_object_patch("model_sampling", wrapped_sampler)
-            logger.info(
-                "DyPE_QwenImage: installed sampler shift via wrapper (is_flux=%s, dype_shift=%.4f).",
-                is_flux,
-                dype_shift,
-            )
-
-    def dype_wrapper_function(model_function, args_dict):
-        if enable_dype:
-            timestep_tensor = args_dict.get("timestep")
-            c = args_dict.get("c", {})
-            input_x = args_dict.get("input")
-            adjust_enabled = editing_mode != "full" and editing_strength < 1.0
-            is_editing = False
-            if adjust_enabled and isinstance(c, dict):
-                editing_keys = {
-                    "image",
-                    "image_embeds",
-                    "image_tokens",
-                    "concat_latent_image",
-                    "concat_mask",
-                    "concat_mask_image",
-                }
-                for key in editing_keys:
-                    if key in c and c[key] is not None:
-                        is_editing = True
-                        break
-            if adjust_enabled and not is_editing and input_x is not None and hasattr(input_x, "abs"):
-                try:
-                    variance = float(input_x.abs().mean().item())
-                    if variance < 0.25:
-                        is_editing = True
-                except Exception:
-                    pass
-            current_sigma: float | None = None
-            if timestep_tensor is not None and sigma_max and sigma_max > 0:
-                if torch.is_tensor(timestep_tensor):
-                    if timestep_tensor.numel() > 0:
-                        current_sigma = float(timestep_tensor.reshape(-1)[0].item())
-                elif isinstance(timestep_tensor, (int, float)):
-                    current_sigma = float(timestep_tensor)
-            if current_sigma is not None:
-                normalized = max(min(current_sigma / sigma_max, 1.0), 0.0)
-                new_embedder.set_timestep(normalized, is_editing=is_editing)
-
-        input_x = args_dict.get("input")
-        timestep = args_dict.get("timestep")
-        conditioning = args_dict.get("c", {})
-        return model_function(input_x, timestep, **conditioning)
-
-    cloned.set_model_unet_function_wrapper(dype_wrapper_function)
-
-    grid = new_embedder.grid
-    logger.info(
-        "DyPE_QwenImage: patching positional embedder (method=%s, enable_dype=%s, "
-        "dype_exponent=%s, base_axes=%s, target_axes=%s, base_shift=%s, max_shift=%s, "
-        "editing_mode=%s, editing_strength=%.3f).",
-        method_normalized,
-        enable_dype,
-        dype_exponent,
-        grid.base_axes,
-        grid.max_axes,
-        base_shift,
-        max_shift,
-        editing_mode,
-        editing_strength,
+        spatial_axes=(1, 2),
+        expected_axes_len=3,
+        log_prefix="DyPE_QwenImage",
+        geometry_label="Qwen",
     )
 
-    return cloned
+
+def apply_dype_to_flux2(
+    model: ModelPatcher,
+    width: int,
+    height: int,
+    method: str,
+    enable_dype: bool,
+    dype_exponent: float,
+    base_width: int,
+    base_height: int,
+    base_shift: float,
+    max_shift: float,
+    auto_detect: bool,
+    editing_strength: float,
+    editing_mode: str,
+) -> ModelPatcher:
+    return _apply_dype_patch(
+        model=model,
+        width=width,
+        height=height,
+        method=method,
+        enable_dype=enable_dype,
+        dype_exponent=dype_exponent,
+        base_width=base_width,
+        base_height=base_height,
+        base_shift=base_shift,
+        max_shift=max_shift,
+        auto_detect=auto_detect,
+        editing_strength=editing_strength,
+        editing_mode=editing_mode,
+        spatial_axes=(1, 2),
+        expected_axes_len=4,
+        log_prefix="DyPE_Flux2",
+        geometry_label="Flux2",
+    )
 
 
 __all__ = [
     "QwenSpatialPosEmbed",
     "apply_dype_to_qwen_image",
+    "apply_dype_to_flux2",
 ]

@@ -94,3 +94,6 @@
   stays below an epsilon threshold (device-friendly and avoids per-pixel Python loops).
 - Keeping generic batch utilities in a dedicated node pack (for example `Skoogeer-Batch-Ops`)
   helps this repository stay focused on flow-matching upscaling and DyPE.
+- Flux2 uses a 4-axis RoPE scheme; extending DyPE support required a spatial-axis selector
+  so only height/width extrapolate while the text axis stays static, plus a dedicated
+  Flux2 DyPE node with Flux-shift defaults.

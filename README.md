@@ -7,8 +7,8 @@
 ## Overview
 
 This repository ships a progressive upscaling node designed for flow-matching
-models such as Qwen Image, alongside a powerful model patcher (DyPE) to enable
-high-resolution generation.
+models such as Qwen Image and Flux2, alongside a powerful model patcher (DyPE)
+to enable high-resolution generation.
 
 1.  **Flow Matching Progressive Upscaler:** Implements the approach outlined in
     `docs/Approach.pdf`. It incrementally doubles resolution, re-noises the
@@ -18,7 +18,10 @@ high-resolution generation.
     spatial rotary embeddings. It allows the diffusion model to stay coherent
     far beyond its native training resolution by applying Dynamic Position
     Extrapolation (DyPE).
-3.  **Latent Upscale Advanced:** A covariance-aware latent resampler inspired by
+3.  **DyPE for Flux2:** A model patch node for Flux2 that applies the same DyPE
+    approach while respecting Flux2’s 4-axis positional scheme (text stays
+    static while spatial axes extrapolate).
+4.  **Latent Upscale Advanced:** A covariance-aware latent resampler inspired by
     `upscaling.md` (optional global whitening / moment matching around the
     spatial upscaler). Defaults to matching ComfyUI’s standard latent upscale
     behavior unless you enable covariance processing.
@@ -194,6 +197,34 @@ The `method` parameter determines the math used to handle coordinates outside th
 | `dype_exponent` | FLOAT | `2.0` | How aggressively DyPE ramps. Higher = stays closer to base res longer. |
 | `base_shift` | FLOAT | `1.15` | Baseline noise schedule shift. |
 | `max_shift` | FLOAT | `1.35` | Max noise schedule shift at target resolution. |
+| `editing_strength` | FLOAT | `1.0` | Lower this to preserve original structure during Inpainting/Img2Img. |
+| `editing_mode` | enum | `adaptive` | Tapering strategy for edits. |
+
+**Outputs**
+- `model`: The patched model ready for the KSampler.
+
+---
+
+## Part 3: DyPE for Flux2
+
+Flux2 models use a 4-axis RoPE layout (index, height, width, text). DyPE for
+Flux2 extrapolates only the spatial axes (height/width) while keeping the text
+axis static so prompt conditioning remains stable.
+
+### Node Parameters: DyPE for Flux2
+
+**Required inputs**
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `model` | MODEL | – | Flux2 diffusion model. |
+| `width` / `height` | INT | `1024` | Target render resolution (must match your latent). |
+| `auto_detect` | BOOLEAN | `True` | Automatically infer patch size/base resolution from model. |
+| `method` | enum | `yarn` | Extrapolation strategy (same as Qwen Image). |
+| `enable_dype` | BOOLEAN | `True` | Toggle the dynamic scaling over time. |
+| `dype_exponent` | FLOAT | `2.0` | How aggressively DyPE ramps. Higher = stays closer to base res longer. |
+| `base_shift` | FLOAT | `2.02` | Baseline Flux2 noise schedule shift. |
+| `max_shift` | FLOAT | `2.35` | Max noise schedule shift at target resolution. |
 | `editing_strength` | FLOAT | `1.0` | Lower this to preserve original structure during Inpainting/Img2Img. |
 | `editing_mode` | enum | `adaptive` | Tapering strategy for edits. |
 
